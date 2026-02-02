@@ -1,0 +1,12 @@
+{# Out-of-Band swap for translate button - updates independently of main response #}
+<button type="button" id="translate-btn" hx-swap-oob="true"
+        hx-post="/api/translate/{{ session_id }}/{{ page }}"
+        hx-target="#translated-content"
+        hx-swap="innerHTML"
+        hx-include="[name='page']"
+        hx-indicator="#translate-spinner, #panel-loading"
+        hx-disabled-elt="this, #translate-all-btn"
+        {% if is_translated %}hx-vals='{"force": "1"}'{% endif %}
+        class="btn btn-action {% if is_translated %}btn-secondary{% else %}btn-primary{% endif %}">
+    {% if is_translated %}Re-translate{% else %}Translate{% endif %}<span id="translate-spinner" class="spinner htmx-indicator"></span>
+</button>

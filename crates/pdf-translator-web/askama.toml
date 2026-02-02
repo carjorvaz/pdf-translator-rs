@@ -1,0 +1,3 @@
+# Askama template configuration
+[general]
+dirs = ["templates"]

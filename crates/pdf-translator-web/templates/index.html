@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div id="upload-container" class="upload-container">
+    <form id="upload-form" hx-encoding="multipart/form-data" hx-post="/api/upload"
+          hx-indicator="#upload-spinner">
+        <div id="upload-area" class="upload-area">
+            <input type="file" id="file-input" name="file" accept=".pdf" class="file-input-hidden">
+            <h2>Drop PDF here or click to upload</h2>
+            <p>Translate PDF documents with AI</p>
+            <span id="upload-spinner" class="spinner htmx-indicator"></span>
+        </div>
+    </form>
+</div>
+{% endblock %}

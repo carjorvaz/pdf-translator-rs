@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+
+{% block title %}PDF Translator - {{ filename }}{% endblock %}
+
+{% block content %}
+<div id="app" class="app active">
+    {% include "partials/toolbar.html" %}
+    <div id="progress-area" class="hidden">
+        <div class="progress-bar"><div class="progress-fill" style="width: 0%"></div></div>
+        <div class="progress-text"></div>
+    </div>
+    {% include "partials/viewer.html" %}
+</div>
+{% endblock %}
+
+{# Toast class triggers CSS animation for auto-dismiss #}
+{% block toast_class %}show success{% endblock %}
+{% block toast %}PDF loaded{% endblock %}

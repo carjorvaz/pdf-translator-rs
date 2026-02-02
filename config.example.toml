@@ -1,0 +1,46 @@
+# PDF Translator Configuration Example
+# Copy this to config.toml and customize as needed
+
+# Source language (default: fr)
+source_lang = "fr"
+
+# Target language (default: en)
+# Note: Output is limited to Latin-script languages due to font encoding constraints
+target_lang = "en"
+
+# Translation text color
+# Options: dark_red, black, blue, dark_green, purple
+[text_color]
+r = 0.8
+g = 0.0
+b = 0.0
+
+# Translator backend configuration
+# Supports any OpenAI-compatible API (llama.cpp, Ollama, DeepSeek, OpenAI, etc.)
+[translator]
+type = "open_ai_compatible"
+api_base = "http://localhost:8080/v1"
+# api_key = "sk-xxx"  # Optional for local servers
+model = "default_model"
+retry_count = 3
+retry_delay_ms = 1000
+
+# Cache configuration
+[cache]
+# Enable memory cache
+memory_enabled = true
+# Maximum memory cache entries
+memory_max_entries = 1000
+# Memory cache TTL in seconds (0 = no expiry)
+memory_ttl_seconds = 0
+
+# Enable disk cache
+disk_enabled = true
+# Disk cache directory (default: ~/.cache/pdf-translator)
+# disk_path = "/path/to/cache"
+
+# PDF rendering scale factor (default: 2.0 for high DPI)
+render_scale = 2.0
+
+# Pages to load per batch in web UI
+pages_per_load = 2
