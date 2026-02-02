@@ -1,0 +1,65 @@
+[package]
+name = "pdf-translator-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "pdf-translator-web"
+path = "src/main.rs"
+
+[dependencies]
+pdf-translator-core = { path = "../pdf-translator-core" }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Web framework
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tower-sessions = { workspace = true }
+
+# Templates
+askama = { workspace = true }
+askama_web = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Environment
+dotenvy = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Misc
+uuid = { workspace = true }
+bytes = { workspace = true }
+mime_guess = { workspace = true }
+tempfile = { workspace = true }
+
+# Multipart uploads
+axum-extra = { version = "0.10", features = ["multipart"] }
+
+# SSE streaming
+async-stream = "0.3"
+tokio-stream = "0.1"
+futures = "0.3"
+
+# CLI
+clap = { workspace = true }
+
+[lints]
+workspace = true

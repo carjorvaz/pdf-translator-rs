@@ -1,0 +1,27 @@
+{# Dual-panel viewer - Original and Translated side by side #}
+<div id="viewer" class="viewer">
+    <div class="panel">
+        <div class="panel-header">Original</div>
+        <div class="panel-content" id="original-panel">
+            <img id="original-img" class="page-image" src="/api/page/{{ session_id }}/{{ page }}" alt="Original page" decoding="async">
+        </div>
+    </div>
+    <div class="panel">
+        <div class="panel-header">Translated</div>
+        <div class="panel-body">
+            <div class="panel-content" id="translated-panel">
+                <div id="translated-content">
+                    {% if is_translated %}
+                    <img class="page-image" src="/api/page/{{ session_id }}/{{ page }}?translated=1&v={{ version }}" alt="Translated" decoding="async">
+                    {% else %}
+                    <div class="placeholder">Click "Translate" to see translation</div>
+                    {% endif %}
+                </div>
+            </div>
+            <div id="panel-loading" class="panel-loading" role="status" aria-live="polite">
+                <div class="panel-loading-spinner" aria-hidden="true"></div>
+                <span>Translating page...</span>
+            </div>
+        </div>
+    </div>
+</div>

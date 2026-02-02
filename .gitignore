@@ -1,0 +1,57 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.envrc
+
+# Cache directories
+.cache/
+.cached/
+
+# Nix
+result
+result-*
+.direnv/
+
+# Claude Code
+.claude/
+.mcp.json
+
+# Sandbox placeholder files
+.bashrc
+.bash_profile
+.zshrc
+.zprofile
+.profile
+.gitconfig
+.gitmodules
+.ripgreprc
+
+# Test files
+*.pdf
+!**/tests/fixtures/*.pdf
+
+# Logs
+*.log
+application.log
+
+# Temporary files
+/tmp/
+*.tmp
+
+# Reference materials (not part of this project)
+/reference/

@@ -1,0 +1,9 @@
+{# Out-of-Band swap for translate-all button #}
+<button type="button" id="translate-all-btn" hx-swap-oob="true"
+        hx-post="/api/translate-all/{{ session_id }}/start"
+        hx-target="#progress-area"
+        hx-swap="outerHTML"
+        hx-disabled-elt="this, #translate-btn"
+        class="btn btn-primary btn-action">
+    All Pages
+</button>

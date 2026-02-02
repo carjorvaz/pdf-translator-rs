@@ -1,0 +1,63 @@
+{# Viewer fragment returned when navigating pages - includes OOB updates #}
+<div id="viewer" class="viewer">
+    <div class="panel">
+        <div class="panel-header">Original</div>
+        <div class="panel-content" id="original-panel">
+            <img id="original-img" class="page-image" src="/api/page/{{ session_id }}/{{ page }}" alt="Original page">
+        </div>
+    </div>
+    <div class="panel">
+        <div class="panel-header">Translated</div>
+        <div class="panel-content" id="translated-panel">
+            <div id="translated-content">
+                {% if is_translated %}
+                <img class="page-image" src="/api/page/{{ session_id }}/{{ page }}?translated=1&v={{ version }}" alt="Translated">
+                {% else %}
+                <div class="placeholder">Click "Translate" to see translation</div>
+                {% endif %}
+            </div>
+            <div id="panel-loading" class="panel-loading htmx-indicator" role="status" aria-live="polite">
+                <div class="panel-loading-spinner" aria-hidden="true"></div>
+                <span>Translating page...</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+{# OOB updates for pagination and buttons #}
+{# Page input uses HTMX directly - no JavaScript needed #}
+<div id="pagination" hx-swap-oob="true" class="pagination">
+    <button type="button" class="btn btn-secondary"
+            hx-get="/api/page-view/{{ session_id }}/{{ self.prev_page() + 1 }}"
+            hx-target="#viewer"
+            hx-swap="outerHTML"
+            hx-push-url="/view/{{ session_id }}/{{ self.prev_page() + 1 }}"
+            {% if page == 0 %}disabled{% endif %}>←</button>
+    <input type="number" name="page" class="page-input" min="1" max="{{ page_count }}" value="{{ page + 1 }}"
+           hx-get="/api/page-view/{{ session_id }}"
+           hx-trigger="keyup[key=='Enter']"
+           hx-target="#viewer"
+           hx-swap="outerHTML"
+           hx-include="this">
+    <span>/ {{ page_count }}</span>
+    <button type="button" class="btn btn-secondary"
+            hx-get="/api/page-view/{{ session_id }}/{{ self.next_page() + 1 }}"
+            hx-target="#viewer"
+            hx-swap="outerHTML"
+            hx-push-url="/view/{{ session_id }}/{{ self.next_page() + 1 }}"
+            {% if page >= page_count - 1 %}disabled{% endif %}>→</button>
+</div>
+
+<button type="button" id="translate-btn" hx-swap-oob="true"
+        hx-post="/api/translate/{{ session_id }}/{{ page }}"
+        hx-target="#translated-content"
+        hx-swap="innerHTML"
+        hx-include="[name='page']"
+        hx-indicator="#translate-spinner, #panel-loading"
+        hx-disabled-elt="this, #translate-all-btn"
+        {% if is_translated %}hx-vals='{"force": "1"}'{% endif %}
+        class="btn btn-action {% if is_translated %}btn-secondary{% else %}btn-primary{% endif %}">
+    {% if is_translated %}Re-translate{% else %}Translate{% endif %}<span id="translate-spinner" class="spinner htmx-indicator"></span>
+</button>
+
+<a id="download-btn" hx-swap-oob="true" href="/api/download/{{ session_id }}" class="btn btn-success btn-action{% if !has_any_translations %} disabled{% endif %}">Download</a>

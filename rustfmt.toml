@@ -1,0 +1,27 @@
+# Rustfmt configuration
+edition = "2024"
+
+# Formatting options
+max_width = 100
+tab_spaces = 4
+newline_style = "Unix"
+use_small_heuristics = "Default"
+
+# Import organization
+imports_granularity = "Module"
+group_imports = "StdExternalCrate"
+reorder_imports = true
+reorder_modules = true
+
+# Comments
+wrap_comments = true
+format_code_in_doc_comments = true
+doc_comment_code_block_width = 80
+normalize_comments = true
+normalize_doc_attributes = true
+
+# Other
+format_strings = true
+format_macro_matchers = true
+format_macro_bodies = true
+skip_children = false

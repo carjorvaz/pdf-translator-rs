@@ -1,0 +1,24 @@
+{# Out-of-Band swap for pagination controls #}
+{# URLs use 1-based page numbers for better UX (page 1 = first page) #}
+{# Page input uses HTMX directly - no JavaScript needed #}
+<div id="pagination" hx-swap-oob="true" class="pagination">
+    <button type="button" class="btn btn-secondary"
+            hx-get="/api/page-view/{{ session_id }}/{{ self.prev_page() + 1 }}"
+            hx-target="#viewer"
+            hx-swap="outerHTML"
+            hx-push-url="/view/{{ session_id }}/{{ self.prev_page() + 1 }}"
+            {% if page == 0 %}disabled{% endif %}>←</button>
+    <input type="number" name="page" class="page-input" min="1" max="{{ page_count }}" value="{{ page + 1 }}"
+           hx-get="/api/page-view/{{ session_id }}"
+           hx-trigger="change"
+           hx-target="#viewer"
+           hx-swap="outerHTML"
+           hx-include="this">
+    <span>/ {{ page_count }}</span>
+    <button type="button" class="btn btn-secondary"
+            hx-get="/api/page-view/{{ session_id }}/{{ self.next_page() + 1 }}"
+            hx-target="#viewer"
+            hx-swap="outerHTML"
+            hx-push-url="/view/{{ session_id }}/{{ self.next_page() + 1 }}"
+            {% if page >= page_count - 1 %}disabled{% endif %}>→</button>
+</div>

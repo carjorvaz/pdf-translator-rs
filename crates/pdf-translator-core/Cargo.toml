@@ -1,0 +1,62 @@
+[package]
+name = "pdf-translator-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# PDF processing
+mupdf = { workspace = true }
+lopdf = { workspace = true }
+image = { workspace = true }
+webp = { workspace = true }
+
+# HTTP client
+reqwest = { workspace = true }
+
+# Caching
+moka = { workspace = true }
+sled = { workspace = true }
+
+# Config
+config = { workspace = true }
+toml = { workspace = true }
+
+# Async utilities
+async-trait = { workspace = true }
+futures = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Misc
+md5 = { workspace = true }
+uuid = { workspace = true }
+bytes = { workspace = true }
+urlencoding = { workspace = true }
+
+# Font handling
+ttf-parser = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

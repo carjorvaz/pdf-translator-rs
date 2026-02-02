@@ -1,0 +1,2 @@
+{# Out-of-Band swap for download button #}
+<a id="download-btn" hx-swap-oob="true" href="/api/download/{{ session_id }}" class="btn btn-success btn-action{% if !has_any_translations %} disabled{% endif %}">Download</a>

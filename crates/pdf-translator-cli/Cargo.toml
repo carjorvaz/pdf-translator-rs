@@ -1,0 +1,44 @@
+[package]
+name = "pdf-translator-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "pdf-translate"
+path = "src/main.rs"
+
+[dependencies]
+pdf-translator-core = { path = "../pdf-translator-core" }
+
+# Async runtime
+tokio = { workspace = true }
+
+# CLI
+clap = { workspace = true }
+
+# Config
+config = { workspace = true }
+toml = { workspace = true }
+serde = { workspace = true }
+
+# Environment
+dotenvy = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Progress
+indicatif = "0.17"
+
+[lints]
+workspace = true
