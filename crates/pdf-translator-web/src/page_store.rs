@@ -80,12 +80,10 @@ impl PageStore {
         self.versions.get(&page).copied().unwrap_or(0)
     }
 
-    /// Check if a page has been translated (based on metadata).
     pub fn has_page(&self, page: usize) -> bool {
         self.versions.contains_key(&page)
     }
 
-    /// Check if any pages have been translated.
     pub fn is_empty(&self) -> bool {
         self.versions.is_empty()
     }
@@ -116,7 +114,6 @@ impl PageStore {
     // Test helpers - sync I/O for unit tests
     // =========================================================================
 
-    /// Get count of translated pages.
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.versions.len()

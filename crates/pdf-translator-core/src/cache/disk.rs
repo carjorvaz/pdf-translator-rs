@@ -10,7 +10,6 @@ pub struct DiskCache {
 }
 
 impl DiskCache {
-    /// Create or open a disk cache at the given path
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
 
@@ -34,7 +33,6 @@ impl DiskCache {
         Ok(Self { db })
     }
 
-    /// Get a value from cache
     pub fn get(&self, key: &str) -> Option<Vec<u8>> {
         match self.db.get(key.as_bytes()) {
             Ok(Some(value)) => Some(value.to_vec()),
@@ -46,7 +44,6 @@ impl DiskCache {
         }
     }
 
-    /// Insert a value into cache
     pub fn insert(&self, key: &str, value: &[u8]) -> Result<()> {
         self.db
             .insert(key.as_bytes(), value)
@@ -60,12 +57,10 @@ impl DiskCache {
         Ok(())
     }
 
-    /// Check if key exists
     pub fn contains(&self, key: &str) -> bool {
         self.db.contains_key(key.as_bytes()).unwrap_or(false)
     }
 
-    /// Remove a value from cache
     pub fn remove(&self, key: &str) -> Result<()> {
         self.db
             .remove(key.as_bytes())
@@ -73,7 +68,6 @@ impl DiskCache {
         Ok(())
     }
 
-    /// Clear all entries
     pub fn clear(&self) -> Result<()> {
         self.db.clear().map_err(|e| Error::CacheWrite(e.to_string()))?;
         self.db
@@ -82,17 +76,14 @@ impl DiskCache {
         Ok(())
     }
 
-    /// Get approximate size in bytes
     pub fn size_on_disk(&self) -> u64 {
         self.db.size_on_disk().unwrap_or(0)
     }
 
-    /// Get number of entries
     pub fn len(&self) -> usize {
         self.db.len()
     }
 
-    /// Check if cache is empty
     pub fn is_empty(&self) -> bool {
         self.db.is_empty()
     }

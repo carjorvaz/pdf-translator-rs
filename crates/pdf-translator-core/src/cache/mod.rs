@@ -16,7 +16,6 @@ pub struct TranslationCache {
 }
 
 impl TranslationCache {
-    /// Create a new translation cache from configuration
     pub fn new(config: &CacheConfig) -> Result<Self> {
         let memory = if config.memory_enabled {
             Some(MemoryCache::new(
@@ -41,7 +40,6 @@ impl TranslationCache {
         Ok(Self { memory, disk })
     }
 
-    /// Get a cached translation
     pub async fn get(&self, key: &CacheKey) -> Option<Vec<u8>> {
         let key_str = key.to_string();
 
@@ -64,7 +62,6 @@ impl TranslationCache {
         None
     }
 
-    /// Store a translation in cache
     pub async fn insert(&self, key: &CacheKey, value: Vec<u8>) {
         let key_str = key.to_string();
 
@@ -79,12 +76,10 @@ impl TranslationCache {
         }
     }
 
-    /// Check if a key exists in cache
     pub async fn contains(&self, key: &CacheKey) -> bool {
         self.get(key).await.is_some()
     }
 
-    /// Clear all caches
     pub fn clear(&self) {
         if let Some(ref memory) = self.memory {
             memory.clear();

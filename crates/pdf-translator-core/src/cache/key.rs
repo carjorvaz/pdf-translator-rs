@@ -8,15 +8,10 @@ use crate::config::Lang;
 /// - Keys are fixed-length (32 hex chars) for consistent storage
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheKey {
-    /// The computed hash (32 hex characters)
     hash: String,
 }
 
 impl CacheKey {
-    /// Create a new cache key from all relevant inputs.
-    ///
-    /// The key is an MD5 hash of the concatenated inputs, ensuring
-    /// cache hits only when all parameters match exactly.
     pub fn new(
         doc_id: impl AsRef<str>,
         page_num: usize,
@@ -41,9 +36,6 @@ impl CacheKey {
         }
     }
 
-    /// Create from document hash and page text.
-    ///
-    /// Convenience method that truncates doc_hash if needed.
     pub fn from_page(
         doc_hash: &str,
         page_num: usize,
@@ -54,7 +46,6 @@ impl CacheKey {
         Self::new(doc_hash, page_num, page_text, translator, target_lang)
     }
 
-    /// Get the raw hash string (for debugging).
     pub fn as_str(&self) -> &str {
         &self.hash
     }
