@@ -1,13 +1,5 @@
 use thiserror::Error;
 
-/// Unified error type for pdf-translator-core
-///
-/// This enum encompasses all error cases that can occur in the library:
-/// - PDF operations (opening, reading, rendering, saving)
-/// - Translation operations (API requests, responses, rate limiting)
-/// - Cache operations (initialization, reading, writing)
-/// - Configuration operations (loading, validation)
-/// - General I/O operations
 #[derive(Error, Debug)]
 pub enum Error {
     // ==========================================================================

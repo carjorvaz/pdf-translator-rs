@@ -188,17 +188,14 @@ impl PdfTranslator {
         pdf::overlay::combine_pdfs(&translated_pages)
     }
 
-    /// Get the current configuration
     pub const fn config(&self) -> &AppConfig {
         &self.config
     }
 
-    /// Get the translator info
     pub fn translator_info(&self) -> translator::TranslatorInfo {
         self.translator.info()
     }
 
-    /// Clear the translation cache
     pub fn clear_cache(&self) {
         self.cache.clear();
     }

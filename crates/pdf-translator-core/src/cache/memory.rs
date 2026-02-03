@@ -7,7 +7,6 @@ pub struct MemoryCache {
 }
 
 impl MemoryCache {
-    /// Create a new memory cache
     pub fn new(max_entries: u64, ttl_seconds: u64) -> Self {
         let mut builder = Cache::builder().max_capacity(max_entries);
 
@@ -20,22 +19,18 @@ impl MemoryCache {
         }
     }
 
-    /// Get a value from cache
     pub async fn get(&self, key: &str) -> Option<Vec<u8>> {
         self.cache.get(key).await
     }
 
-    /// Insert a value into cache
     pub async fn insert(&self, key: String, value: Vec<u8>) {
         self.cache.insert(key, value).await;
     }
 
-    /// Remove a value from cache
     pub async fn remove(&self, key: &str) {
         self.cache.remove(key).await;
     }
 
-    /// Clear all entries
     pub fn clear(&self) {
         self.cache.invalidate_all();
     }

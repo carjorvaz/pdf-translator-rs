@@ -36,7 +36,6 @@ use super::text::BoundingBox;
 // =============================================================================
 
 /// Default font size for translations (in points).
-/// A readable size that works well for most documents.
 const DEFAULT_FONT_SIZE: f32 = 13.0;
 
 /// Line height as a multiple of font size.
@@ -45,19 +44,10 @@ const LINE_HEIGHT_FACTOR: f32 = 1.25;
 /// Average character width as a fraction of font size for Noto Serif.
 const CHAR_WIDTH_FACTOR: f32 = 0.55;
 
-/// Horizontal padding on left side of cover rectangles (in points).
 const RECT_LEFT_PADDING: f32 = 5.0;
-
-/// Horizontal padding on right side of cover rectangles (in points).
 const RECT_RIGHT_PADDING: f32 = 10.0;
-
-/// Vertical padding above text in cover rectangle (in points).
 const RECT_TOP_PADDING: f32 = 3.0;
-
-/// Vertical padding below text in cover rectangle (in points).
 const RECT_BOTTOM_PADDING: f32 = 3.0;
-
-/// Right margin from page edge for text wrapping (in points).
 const PAGE_RIGHT_MARGIN: f32 = 40.0;
 
 // =============================================================================
