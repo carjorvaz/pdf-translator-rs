@@ -6,7 +6,7 @@ mod routes;
 mod state;
 mod templates;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     extract::DefaultBodyLimit,
     routing::{get, post},
@@ -123,12 +123,11 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Create application state
-    let state = Arc::new(AppState::new(
-        args.api_base,
-        args.api_key,
-        args.model,
-    ));
+    // Create application state (opens cache - fails fast if locked)
+    let state = Arc::new(
+        AppState::new(args.api_base, args.api_key, args.model)
+            .context("Failed to initialize application state")?
+    );
 
     // Spawn background task for session cleanup (runs every 5 minutes)
     let cleanup_state = Arc::clone(&state);
@@ -145,6 +144,7 @@ async fn main() -> Result<()> {
     let app = Router::new()
         // Pages
         .route("/", get(routes::index))
+        .route("/view/{session_id}", get(routes::view_page_redirect))
         .route("/view/{session_id}/{page}", get(routes::view_page))
         // API endpoints - HTML fragments (HTMX)
         .route("/api/upload", post(routes::upload_pdf))
@@ -152,10 +152,12 @@ async fn main() -> Result<()> {
         // Query-based page view for HTMX page input (hypermedia control)
         .route("/api/page-view/{session_id}", get(routes::get_page_view_query))
         .route("/api/translate/{session_id}/{page}", post(routes::translate_page))
+        .route("/api/prefetch/{session_id}/{page}", post(routes::prefetch_page))
         .route("/api/translate-all/{session_id}/start", post(routes::start_translate_all))
-        .route("/api/translate-all/{session_id}/status", get(routes::get_translate_all_status))
         .route("/api/translate-all/{session_id}/stream", get(routes::translate_all_stream))
         .route("/api/settings/{session_id}", post(routes::update_settings))
+        .route("/api/auto-translate/{session_id}", post(routes::toggle_auto_translate))
+        .route("/api/view-mode/{session_id}/{mode}", post(routes::set_view_mode))
         // API endpoints - binary responses
         .route("/api/page/{session_id}/{page}", get(routes::get_page_image))
         .route("/api/download/{session_id}", get(routes::download_pdf))
@@ -170,6 +172,12 @@ async fn main() -> Result<()> {
                 .service(ServeDir::new(resolve_static_dir(args.static_dir.as_deref()))),
         )
         // Middleware
+        // Cache-Control for HTML fragments - prevents bfcache issues with HTMX
+        // (images/downloads set their own headers, so this only affects HTML)
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store, max-age=0"),
+        ))
         .layer(CompressionLayer::new()) // Gzip compression for responses
         .layer(DefaultBodyLimit::max(300 * 1024 * 1024)) // 300MB limit for uploads
         .layer(TraceLayer::new_for_http())

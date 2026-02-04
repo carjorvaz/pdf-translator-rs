@@ -1,71 +1,81 @@
 {# Progress bar for translate-all operation #}
 {% if done %}
 {# Final state - no more polling, auto-hide via CSS animation #}
-<div id="progress-area" class="auto-hide">
-    <div class="progress-bar"><div class="progress-fill" style="width: {% if has_error %}{{ self.percent() }}{% else %}100{% endif %}%"></div></div>
+<div id="progress-area" class="auto-hide" role="status" aria-live="polite">
+    <div class="progress-bar" role="progressbar" aria-valuenow="{% if has_error %}{{ self.percent() }}{% else %}100{% endif %}" aria-valuemin="0" aria-valuemax="100" aria-label="Translation progress"><div class="progress-fill" style="width: {% if has_error %}{{ self.percent() }}{% else %}100{% endif %}%"></div></div>
     <div class="progress-text">{{ message }}</div>
 </div>
 
 {# Toast notification - auto-dismiss via CSS animation #}
-<div id="toast" hx-swap-oob="true" class="show {{ self.toast_type() }}">{{ self.toast_message() }}</div>
+<div id="toast" hx-swap-oob="true" class="show {{ self.toast_type() }}" role="alert" aria-live="assertive">{{ self.toast_message() }}</div>
 
 {# Re-enable buttons and enable download #}
 <a id="download-btn" hx-swap-oob="true" href="/api/download/{{ session_id }}" class="btn btn-success btn-action">Download</a>
 <button type="button" id="translate-btn" hx-swap-oob="true"
-        hx-post="/api/translate/{{ session_id }}/{{ current_page }}"
+        hx-post="/api/translate/{{ session_id }}/{{ current_page + 1 }}"
         hx-target="#translated-content"
         hx-swap="innerHTML"
-        hx-indicator="#translate-spinner, #panel-loading"
-        hx-disabled-elt="this, #translate-all-btn"
+        hx-indicator="#panel-loading"
+        hx-disabled-elt="#translate-btn, #translate-all-btn"
+        hx-sync="this:abort"
+        _="on htmx:beforeRequest add .loading to me on htmx:afterRequest remove .loading from me"
         class="btn btn-primary btn-action">
-    Translate<span id="translate-spinner" class="spinner htmx-indicator"></span>
+    <span class="btn-text">Translate</span>
+    <span class="btn-text-loading">Translating<span class="spinner"></span></span>
 </button>
 <button type="button" id="translate-all-btn" hx-swap-oob="true"
         hx-post="/api/translate-all/{{ session_id }}/start"
         hx-target="#progress-area"
         hx-swap="outerHTML"
-        hx-disabled-elt="this, #translate-btn"
+        hx-disabled-elt="#translate-btn, #translate-all-btn"
+        hx-sync="this:abort"
+        hx-confirm="Translate all {{ total }} pages? This may take a while."
+        _="on htmx:beforeRequest add .loading to me on htmx:afterRequest remove .loading from me"
         class="btn btn-primary btn-action">
-    All Pages
+    <span class="btn-text">Translate All</span>
+    <span class="btn-text-loading">Starting<span class="spinner"></span></span>
 </button>
 
 {% if self.show_translated_content() %}
-<div id="translated-content" hx-swap-oob="true"><img class="page-image" src="/api/page/{{ session_id }}/{{ current_page }}?translated=1&v={{ version }}" alt="Translated"></div>
+<div id="translated-content" hx-swap-oob="true"><img class="page-image" src="/api/page/{{ session_id }}/{{ current_page }}?translated=1" alt="Translated"></div>
 {% endif %}
 
 {% else %}
-{# Still in progress - SSE with polling fallback (progressive enhancement) #}
-{# SSE pushes updates instantly when progress changes #}
-{# Polling (2s) is the baseline that works everywhere - SSE enhances it #}
+{# Still in progress - SSE for real-time updates #}
 <div id="progress-area"
      hx-ext="sse"
      sse-connect="/api/translate-all/{{ session_id }}/stream"
      sse-swap="progress"
-     hx-get="/api/translate-all/{{ session_id }}/status"
-     hx-trigger="every 2s"
-     hx-swap="outerHTML">
-    <div class="progress-bar"><div class="progress-fill" style="width: {{ self.percent() }}%"></div></div>
+     hx-swap="outerHTML"
+     role="status" aria-live="polite" aria-busy="true">
+    <div class="progress-bar" role="progressbar" aria-valuenow="{{ self.percent() }}" aria-valuemin="0" aria-valuemax="100" aria-label="Translation progress"><div class="progress-fill" style="width: {{ self.percent() }}%"></div></div>
     <div class="progress-text">{{ message }}</div>
 </div>
 
 {# Disable buttons while in progress #}
 <button type="button" id="translate-btn" hx-swap-oob="true"
-        hx-post="/api/translate/{{ session_id }}/{{ current_page }}"
+        hx-post="/api/translate/{{ session_id }}/{{ current_page + 1 }}"
         hx-target="#translated-content"
         hx-swap="innerHTML"
-        hx-indicator="#translate-spinner, #panel-loading"
-        hx-disabled-elt="this, #translate-all-btn"
+        hx-indicator="#panel-loading"
+        hx-disabled-elt="#translate-btn, #translate-all-btn"
+        hx-sync="this:abort"
+        _="on htmx:beforeRequest add .loading to me on htmx:afterRequest remove .loading from me"
         class="btn btn-primary btn-action"
         disabled>
-    Translate<span id="translate-spinner" class="spinner htmx-indicator"></span>
+    <span class="btn-text">Translate</span>
+    <span class="btn-text-loading">Translating<span class="spinner"></span></span>
 </button>
 <button type="button" id="translate-all-btn" hx-swap-oob="true"
         hx-post="/api/translate-all/{{ session_id }}/start"
         hx-target="#progress-area"
         hx-swap="outerHTML"
-        hx-disabled-elt="this, #translate-btn"
+        hx-disabled-elt="#translate-btn, #translate-all-btn"
+        hx-sync="this:abort"
+        _="on htmx:beforeRequest add .loading to me on htmx:afterRequest remove .loading from me"
         class="btn btn-primary btn-action"
         disabled>
-    All Pages
+    <span class="btn-text">Translate All</span>
+    <span class="btn-text-loading">Starting<span class="spinner"></span></span>
 </button>
 {% endif %}

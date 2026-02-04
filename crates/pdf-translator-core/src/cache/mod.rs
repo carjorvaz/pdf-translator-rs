@@ -6,11 +6,21 @@ pub use memory::MemoryCache;
 pub use disk::DiskCache;
 pub use key::CacheKey;
 
+use std::sync::Arc;
+
 use crate::config::CacheConfig;
 use crate::error::Result;
 
-/// Combined cache with memory and disk layers
+/// Combined cache with memory and disk layers.
+///
+/// This is cheaply cloneable via internal `Arc`, allowing a single cache
+/// to be shared across multiple `PdfTranslator` instances.
+#[derive(Clone)]
 pub struct TranslationCache {
+    inner: Arc<TranslationCacheInner>,
+}
+
+struct TranslationCacheInner {
     memory: Option<MemoryCache>,
     disk: Option<DiskCache>,
 }
@@ -37,23 +47,25 @@ impl TranslationCache {
             None
         };
 
-        Ok(Self { memory, disk })
+        Ok(Self {
+            inner: Arc::new(TranslationCacheInner { memory, disk }),
+        })
     }
 
     pub async fn get(&self, key: &CacheKey) -> Option<Vec<u8>> {
         let key_str = key.to_string();
 
         // Try memory cache first
-        if let Some(ref memory) = self.memory
+        if let Some(ref memory) = self.inner.memory
             && let Some(value) = memory.get(&key_str).await {
                 return Some(value);
             }
 
         // Try disk cache
-        if let Some(ref disk) = self.disk
+        if let Some(ref disk) = self.inner.disk
             && let Some(value) = disk.get(&key_str) {
                 // Populate memory cache on disk hit
-                if let Some(ref memory) = self.memory {
+                if let Some(ref memory) = self.inner.memory {
                     memory.insert(key_str, value.clone()).await;
                 }
                 return Some(value);
@@ -66,12 +78,12 @@ impl TranslationCache {
         let key_str = key.to_string();
 
         // Store in memory cache
-        if let Some(ref memory) = self.memory {
+        if let Some(ref memory) = self.inner.memory {
             memory.insert(key_str.clone(), value.clone()).await;
         }
 
         // Store in disk cache
-        if let Some(ref disk) = self.disk {
+        if let Some(ref disk) = self.inner.disk {
             let _ = disk.insert(&key_str, &value);
         }
     }
@@ -81,11 +93,11 @@ impl TranslationCache {
     }
 
     pub fn clear(&self) {
-        if let Some(ref memory) = self.memory {
+        if let Some(ref memory) = self.inner.memory {
             memory.clear();
         }
 
-        if let Some(ref disk) = self.disk {
+        if let Some(ref disk) = self.inner.disk {
             let _ = disk.clear();
         }
     }

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use pdf_translator_core::{
     AppConfig, Lang, PdfDocument, PdfTranslator, TextColor, TranslatorConfig,
-    DEFAULT_SOURCE_LANG, DEFAULT_TARGET_LANG, DEFAULT_TEXT_COLOR,
+    TranslationCache, DEFAULT_SOURCE_LANG, DEFAULT_TARGET_LANG, DEFAULT_TEXT_COLOR,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -55,12 +55,38 @@ impl TranslateJob {
     }
 }
 
+/// View mode for the dual-panel viewer
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum ViewMode {
+    #[default]
+    Both,
+    TranslatedOnly,
+}
+
+impl ViewMode {
+    /// CSS class for the viewer div
+    pub const fn viewer_class(self) -> &'static str {
+        match self {
+            ViewMode::Both => "viewer",
+            ViewMode::TranslatedOnly => "viewer single",
+        }
+    }
+
+    /// Returns true if showing only translated panel
+    pub const fn is_translated_only(self) -> bool {
+        matches!(self, ViewMode::TranslatedOnly)
+    }
+}
+
 /// Per-session settings
 #[derive(Clone)]
 pub struct SessionSettings {
     pub source_lang: Lang,
     pub target_lang: Lang,
     pub text_color: TextColor,
+    pub view_mode: ViewMode,
+    /// Auto-translate pages on navigation
+    pub auto_translate: bool,
 }
 
 impl Default for SessionSettings {
@@ -69,6 +95,8 @@ impl Default for SessionSettings {
             source_lang: Lang::new(DEFAULT_SOURCE_LANG),
             target_lang: Lang::new(DEFAULT_TARGET_LANG),
             text_color: TextColor::from_name(DEFAULT_TEXT_COLOR).unwrap_or_default(),
+            view_mode: ViewMode::default(),
+            auto_translate: false,
         }
     }
 }
@@ -79,19 +107,29 @@ pub struct AppState {
     sessions: RwLock<HashMap<Uuid, Session>>,
     /// Base configuration (contains OpenAI settings in translator field)
     pub config: AppConfig,
+    /// Shared translation cache (opened once at startup)
+    cache: TranslationCache,
 }
 
 impl AppState {
-    pub fn new(api_base: String, api_key: Option<String>, model: String) -> Self {
+    /// Create new AppState.
+    ///
+    /// Fails if the translation cache cannot be opened (e.g., stale lock from crashed process).
+    pub fn new(api_base: String, api_key: Option<String>, model: String) -> Result<Self> {
         let config = AppConfig {
             translator: TranslatorConfig::new(api_base, api_key, model),
             ..Default::default()
         };
 
-        Self {
+        // Open cache once at startup - fail fast if locked
+        let cache = TranslationCache::new(&config.cache)
+            .map_err(|e| anyhow::anyhow!("Failed to initialize translation cache: {e}"))?;
+
+        Ok(Self {
             sessions: RwLock::new(HashMap::new()),
             config,
-        }
+            cache,
+        })
     }
 
     /// Create a new session with a PDF document.
@@ -134,14 +172,15 @@ impl AppState {
         }
     }
 
-    /// Create a translator for a session.
+    /// Create a translator for a session (uses shared cache).
     pub fn create_translator(&self, settings: &SessionSettings) -> Result<PdfTranslator> {
         let mut config = self.config.clone();
         config.source_lang = settings.source_lang.clone();
         config.target_lang = settings.target_lang.clone();
         config.text_color = settings.text_color;
 
-        PdfTranslator::new(config).map_err(|e| anyhow::anyhow!("Failed to create translator: {e}"))
+        PdfTranslator::with_cache(config, self.cache.clone())
+            .map_err(|e| anyhow::anyhow!("Failed to create translator: {e}"))
     }
 
     /// Cleanup old sessions (older than 1 hour)

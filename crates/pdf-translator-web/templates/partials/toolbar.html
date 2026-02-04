@@ -1,84 +1,88 @@
 {# Toolbar with all controls - language selectors, color picker, view toggle, pagination, and action buttons #}
 {# Language options are provided by the server - single source of truth in Rust code #}
 <div class="toolbar">
-    {# Settings group - hx-include="closest .toolbar-settings" gathers all values automatically #}
-    <div class="toolbar-settings">
-        <div class="toolbar-group">
-            <div class="lang-select">
-                <span id="source-flag" class="lang-flag">{% for lang in source_languages %}{% if lang.code == default_source %}{{ lang.flag }}{% endif %}{% endfor %}</span>
-                <select name="source_lang"
-                        hx-post="/api/settings/{{ session_id }}"
-                        hx-trigger="change"
-                        hx-include="closest .toolbar-settings"
-                        hx-target="#translated-content"
-                        hx-swap="innerHTML">
+    {# Settings form - submits on any select change #}
+    {# Fieldset disabled during batch translation via OOB swap #}
+    <form id="settings-form" class="toolbar-settings"
+          hx-post="/api/settings/{{ session_id }}"
+          hx-trigger="change from:select"
+          hx-target="#translated-content"
+          hx-swap="innerHTML">
+        <fieldset id="settings-fieldset">
+            <div class="toolbar-group">
+                <select name="source_lang" required aria-label="Source language">
                     {% for lang in source_languages %}
-                    <option value="{{ lang.code }}" data-flag="{{ lang.flag }}"{% if lang.code == default_source %} selected{% endif %}>{{ lang.name }}</option>
+                    <option value="{{ lang.code }}"{% if lang.code == default_source %} selected{% endif %}>{{ lang.flag }} {{ lang.name }}</option>
                     {% endfor %}
                 </select>
-            </div>
-            <span class="lang-arrow">&rarr;</span>
-            <div class="lang-select">
-                <span id="target-flag" class="lang-flag">{% for lang in target_languages %}{% if lang.code == default_target %}{{ lang.flag }}{% endif %}{% endfor %}</span>
-                <select name="target_lang"
-                        hx-post="/api/settings/{{ session_id }}"
-                        hx-trigger="change"
-                        hx-include="closest .toolbar-settings"
-                        hx-target="#translated-content"
-                        hx-swap="innerHTML">
+                <span class="lang-arrow">&rarr;</span>
+                <select name="target_lang" required aria-label="Target language">
                     {% for lang in target_languages %}
-                    <option value="{{ lang.code }}" data-flag="{{ lang.flag }}"{% if lang.code == default_target %} selected{% endif %}>{{ lang.name }}</option>
+                    <option value="{{ lang.code }}"{% if lang.code == default_target %} selected{% endif %}>{{ lang.flag }} {{ lang.name }}</option>
                     {% endfor %}
                 </select>
             </div>
-        </div>
 
-        <div class="toolbar-group">
-            <span class="toolbar-label">Text:</span>
-            <div class="color-select">
-                <span id="color-swatch" class="color-swatch {{ default_color }}"></span>
-                <select name="text_color"
-                        hx-post="/api/settings/{{ session_id }}"
-                        hx-trigger="change"
-                        hx-include="closest .toolbar-settings"
-                        hx-target="#translated-content"
-                        hx-swap="innerHTML">
-                    <option value="blue"{% if default_color == "blue" %} selected{% endif %}>Blue</option>
-                    <option value="darkred"{% if default_color == "darkred" %} selected{% endif %}>Red</option>
-                    <option value="black"{% if default_color == "black" %} selected{% endif %}>Black</option>
+            <div class="toolbar-group">
+                <span class="toolbar-label">Text:</span>
+                <select name="text_color" required aria-label="Translation text color">
+                    <option value="blue"{% if default_color == "blue" %} selected{% endif %}>🔵 Blue</option>
+                    <option value="darkred"{% if default_color == "darkred" %} selected{% endif %}>🔴 Red</option>
+                    <option value="black"{% if default_color == "black" %} selected{% endif %}>⚫ Black</option>
                 </select>
             </div>
-        </div>
-
-    </div>
+        </fieldset>
+    </form>
 
     <div class="toolbar-spacer"></div>
 
-    <div class="view-toggle">
-        <button type="button" id="view-both" class="active">Both</button>
-        <button type="button" id="view-translated">Translated</button>
+    <div id="view-toggle" class="view-toggle">
+        <button type="button"
+                hx-post="/api/view-mode/{{ session_id }}/both"
+                hx-target="#viewer"
+                hx-swap="outerHTML"
+                class="{% if !view_translated_only %}active{% endif %}">Both</button>
+        <button type="button"
+                hx-post="/api/view-mode/{{ session_id }}/translated"
+                hx-target="#viewer"
+                hx-swap="outerHTML"
+                class="{% if view_translated_only %}active{% endif %}">Translated</button>
     </div>
 
     {% include "partials/pagination.html" %}
 
+    <label id="auto-translate-toggle" class="auto-translate-toggle">
+        <input type="checkbox"
+               hx-post="/api/auto-translate/{{ session_id }}"
+               hx-swap="none"
+               {% if auto_translate %}checked{% endif %}>
+        <span>Auto-translate</span>
+    </label>
+
     <button type="button" id="translate-btn"
-            hx-post="/api/translate/{{ session_id }}/{{ page }}"
+            hx-post="/api/translate/{{ session_id }}/{{ page + 1 }}"
             hx-target="#translated-content"
             hx-swap="innerHTML"
-            hx-include="[name='page']"
-            hx-indicator="#translate-spinner, #panel-loading"
-            hx-disabled-elt="this, #translate-all-btn"
+            hx-indicator="#panel-loading"
+            hx-disabled-elt="#translate-btn, #translate-all-btn"
+            hx-sync="this:abort"
             {% if is_translated %}hx-vals='{"force": "1"}'{% endif %}
+            _="on htmx:beforeRequest add .loading to me on htmx:afterRequest remove .loading from me"
             class="btn btn-action {% if is_translated %}btn-secondary{% else %}btn-primary{% endif %}">
-        {% if is_translated %}Re-translate{% else %}Translate{% endif %}<span id="translate-spinner" class="spinner htmx-indicator"></span>
+        <span class="btn-text">{% if is_translated %}Re-translate{% else %}Translate{% endif %}</span>
+        <span class="btn-text-loading">Translating<span class="spinner"></span></span>
     </button>
     <button type="button" id="translate-all-btn"
             hx-post="/api/translate-all/{{ session_id }}/start"
             hx-target="#progress-area"
             hx-swap="outerHTML"
-            hx-disabled-elt="this, #translate-btn"
+            hx-disabled-elt="#translate-btn, #translate-all-btn"
+            hx-sync="this:abort"
+            hx-confirm="Translate all {{ page_count }} pages? This may take a while."
+            _="on htmx:beforeRequest add .loading to me on htmx:afterRequest remove .loading from me"
             class="btn btn-primary btn-action">
-        Translate All
+        <span class="btn-text">Translate All</span>
+        <span class="btn-text-loading">Starting<span class="spinner"></span></span>
     </button>
     <a id="download-btn" href="/api/download/{{ session_id }}" class="btn btn-success btn-action{% if !has_translations %} disabled{% endif %}">Download</a>
 </div>

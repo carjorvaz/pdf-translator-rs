@@ -1,4 +1,4 @@
-{# Viewer fragment returned when navigating pages - includes OOB updates #}
+{# View mode change response - returns viewer with new class and OOB updates for toggle buttons #}
 <div id="viewer" class="{{ viewer_class }}">
     <div class="viewer-body">
         <div class="panel" id="original-panel">
@@ -8,17 +8,6 @@
             <div id="translated-content">
                 {% if is_translated %}
                 <img class="page-image" src="/api/page/{{ session_id }}/{{ page }}?translated=1" alt="Translated" decoding="async">
-                {% elif auto_translate %}
-                {# Auto-trigger translation on navigation when auto-translate is enabled #}
-                <div class="placeholder"
-                     hx-post="/api/translate/{{ session_id }}/{{ page + 1 }}"
-                     hx-trigger="load"
-                     hx-target="#translated-content"
-                     hx-swap="innerHTML"
-                     hx-indicator="#panel-loading"
-                     hx-disabled-elt="#translate-btn, #translate-all-btn">
-                    Translating...
-                </div>
                 {% else %}
                 <div class="placeholder">Click "Translate" to see translation</div>
                 {% endif %}
@@ -31,7 +20,16 @@
     </div>
 </div>
 
-{# OOB updates - consolidated pagination template uses is_oob flag #}
-{% include "partials/pagination.html" %}
-{% include "oob/translate_btn.html" %}
-{% include "oob/download_btn.html" %}
+{# OOB update for view toggle buttons #}
+<div id="view-toggle" hx-swap-oob="true" class="view-toggle">
+    <button type="button"
+            hx-post="/api/view-mode/{{ session_id }}/both"
+            hx-target="#viewer"
+            hx-swap="outerHTML"
+            class="{% if !view_translated_only %}active{% endif %}">Both</button>
+    <button type="button"
+            hx-post="/api/view-mode/{{ session_id }}/translated"
+            hx-target="#viewer"
+            hx-swap="outerHTML"
+            class="{% if view_translated_only %}active{% endif %}">Translated</button>
+</div>

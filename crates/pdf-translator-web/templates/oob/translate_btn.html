@@ -1,12 +1,15 @@
 {# Out-of-Band swap for translate button - updates independently of main response #}
+{# Page is in URL - semantically correct REST, no hx-include needed #}
 <button type="button" id="translate-btn" hx-swap-oob="true"
-        hx-post="/api/translate/{{ session_id }}/{{ page }}"
+        hx-post="/api/translate/{{ session_id }}/{{ page + 1 }}"
         hx-target="#translated-content"
         hx-swap="innerHTML"
-        hx-include="[name='page']"
-        hx-indicator="#translate-spinner, #panel-loading"
-        hx-disabled-elt="this, #translate-all-btn"
+        hx-indicator="#panel-loading"
+        hx-disabled-elt="#translate-btn, #translate-all-btn"
+        hx-sync="this:abort"
         {% if is_translated %}hx-vals='{"force": "1"}'{% endif %}
+        _="on htmx:beforeRequest add .loading to me on htmx:afterRequest remove .loading from me"
         class="btn btn-action {% if is_translated %}btn-secondary{% else %}btn-primary{% endif %}">
-    {% if is_translated %}Re-translate{% else %}Translate{% endif %}<span id="translate-spinner" class="spinner htmx-indicator"></span>
+    <span class="btn-text">{% if is_translated %}Re-translate{% else %}Translate{% endif %}</span>
+    <span class="btn-text-loading">Translating<span class="spinner"></span></span>
 </button>

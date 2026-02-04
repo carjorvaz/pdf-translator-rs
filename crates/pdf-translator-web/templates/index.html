@@ -1,15 +1,43 @@
 {% extends "base.html" %}
 
 {% block content %}
-<div id="upload-container" class="upload-container">
-    <form id="upload-form" hx-encoding="multipart/form-data" hx-post="/api/upload"
-          hx-indicator="#upload-spinner">
-        <div id="upload-area" class="upload-area">
-            <input type="file" id="file-input" name="file" accept=".pdf" class="file-input-hidden">
-            <h2>Drop PDF here or click to upload</h2>
-            <p>Translate PDF documents with AI</p>
-            <span id="upload-spinner" class="spinner htmx-indicator"></span>
+<div class="upload-container">
+    {# Graceful degradation: action/method work without JS, htmx enhances with AJAX #}
+    <form class="upload-area" action="/api/upload" method="POST" enctype="multipart/form-data"
+          hx-post="/api/upload" hx-encoding="multipart/form-data"
+          hx-disabled-elt="#file-input"
+          _="on dragover or dragenter halt default then add .dragover
+             on dragleave remove .dragover
+             on drop halt default then remove .dragover then set #file-input.files to event.dataTransfer.files
+             on htmx:xhr:progress(loaded, total) from me
+                add .uploading to me
+                set pct to Math.round(loaded/total*100)
+                set #upload-progress-fill.style.width to pct + '%'
+                set #upload-progress-text.innerText to pct + '% uploaded'
+             on htmx:xhr:loadend from me
+                set #upload-progress-text.innerText to 'Processing PDF...'
+                add .processing to me">
+        <label for="file-input" class="upload-label">
+            <div class="upload-icon">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                    <polyline points="14 2 14 8 20 8"></polyline>
+                    <line x1="12" y1="18" x2="12" y2="12"></line>
+                    <line x1="9" y1="15" x2="12" y2="12"></line>
+                    <line x1="15" y1="15" x2="12" y2="12"></line>
+                </svg>
+            </div>
+            <h2>Upload PDF to Translate</h2>
+            <p>Drag and drop or click to select a PDF file</p>
+        </label>
+        <div class="upload-progress">
+            <div class="upload-progress-bar">
+                <div id="upload-progress-fill" class="upload-progress-fill"></div>
+            </div>
+            <span id="upload-progress-text" class="upload-progress-text">0% uploaded</span>
         </div>
+        <input type="file" name="file" id="file-input" class="file-input-hidden" accept=".pdf,application/pdf" required aria-label="PDF file to translate"
+               _="on change if my.files.length > 0 then send submit to closest <form/> end">
     </form>
 </div>
 {% endblock %}

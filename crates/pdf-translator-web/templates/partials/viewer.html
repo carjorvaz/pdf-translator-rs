@@ -1,26 +1,31 @@
 {# Dual-panel viewer - Original and Translated side by side #}
-<div id="viewer" class="viewer">
-    <div class="panel">
-        <div class="panel-header">Original</div>
-        <div class="panel-content" id="original-panel">
+<div id="viewer" class="{{ viewer_class }}">
+    <div class="viewer-body">
+        <div class="panel" id="original-panel">
             <img id="original-img" class="page-image" src="/api/page/{{ session_id }}/{{ page }}" alt="Original page" decoding="async">
         </div>
-    </div>
-    <div class="panel">
-        <div class="panel-header">Translated</div>
-        <div class="panel-body">
-            <div class="panel-content" id="translated-panel">
-                <div id="translated-content">
-                    {% if is_translated %}
-                    <img class="page-image" src="/api/page/{{ session_id }}/{{ page }}?translated=1&v={{ version }}" alt="Translated" decoding="async">
-                    {% else %}
-                    <div class="placeholder">Click "Translate" to see translation</div>
-                    {% endif %}
+        <div class="panel" id="translated-panel">
+            <div id="translated-content" aria-live="polite" aria-atomic="true">
+                {% if is_translated %}
+                <img class="page-image" src="/api/page/{{ session_id }}/{{ page }}?translated=1" alt="Translated page {{ page + 1 }}" decoding="async">
+                {% elif auto_translate %}
+                {# Auto-trigger translation on page load when auto-translate is enabled #}
+                <div class="placeholder"
+                     hx-post="/api/translate/{{ session_id }}/{{ page + 1 }}"
+                     hx-trigger="load"
+                     hx-target="#translated-content"
+                     hx-swap="innerHTML"
+                     hx-indicator="#panel-loading"
+                     hx-disabled-elt="#translate-btn, #translate-all-btn">
+                    Translating...
                 </div>
+                {% else %}
+                <div class="placeholder">Click "Translate" to see translation</div>
+                {% endif %}
             </div>
-            <div id="panel-loading" class="panel-loading" role="status" aria-live="polite">
-                <div class="panel-loading-spinner" aria-hidden="true"></div>
-                <span>Translating page...</span>
+            <div id="panel-loading" class="panel-loading">
+                <div class="panel-loading-spinner"></div>
+                <span>Translating...</span>
             </div>
         </div>
     </div>

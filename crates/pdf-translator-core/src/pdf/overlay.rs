@@ -158,6 +158,67 @@ impl RenderBlock {
             lines,
         }
     }
+
+    /// Calculate the Y position of the bottom of the last line of text.
+    fn text_bottom_y(&self) -> f32 {
+        let num_lines = self.lines.len().max(1);
+        #[allow(clippy::cast_precision_loss)]
+        let offset = (num_lines - 1) as f32 * self.line_height;
+        self.text_start_y - offset
+    }
+}
+
+/// Minimum vertical gap between text blocks to prevent overlap.
+const MIN_BLOCK_GAP: f32 = 8.0;
+
+/// Maximum X difference for blocks to be considered same paragraph.
+const X_ALIGNMENT_TOLERANCE: f32 = 40.0;
+
+/// Adjust block positions to prevent vertical overlap.
+///
+/// When translations expand (more lines than original), blocks can overlap.
+/// This function:
+/// 1. Aligns blocks with similar X positions (same paragraph) to a common X
+/// 2. Shifts blocks down as needed to prevent vertical overlap
+fn adjust_blocks_to_prevent_overlap(blocks: &mut [RenderBlock]) {
+    if blocks.len() < 2 {
+        return;
+    }
+
+    // Sort by text_start_y descending (top of page = highest Y comes first)
+    blocks.sort_by(|a, b| {
+        b.text_start_y
+            .partial_cmp(&a.text_start_y)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // First pass: align X positions for blocks in the same paragraph
+    // Blocks with similar X are considered part of the same paragraph
+    let mut paragraph_x = blocks[0].text_x;
+
+    for block in blocks.iter_mut().skip(1) {
+        if (block.text_x - paragraph_x).abs() < X_ALIGNMENT_TOLERANCE {
+            // Same paragraph - align to paragraph start
+            block.text_x = paragraph_x;
+        } else {
+            // New paragraph - this becomes the new alignment target
+            paragraph_x = block.text_x;
+        }
+    }
+
+    // Second pass: prevent vertical overlap
+    let mut floor_y = blocks[0].text_bottom_y();
+
+    for block in blocks.iter_mut().skip(1) {
+        if block.text_start_y > floor_y - MIN_BLOCK_GAP {
+            let shift = block.text_start_y - (floor_y - MIN_BLOCK_GAP);
+            block.text_start_y -= shift;
+            block.rect_y -= shift;
+            block.rect_height += shift;
+        }
+
+        floor_y = floor_y.min(block.text_bottom_y());
+    }
 }
 
 // =============================================================================
@@ -240,10 +301,13 @@ impl PdfOverlay {
         let font_size = self.options.font_size.unwrap_or(DEFAULT_FONT_SIZE);
 
         // Convert overlays to render blocks
-        let blocks: Vec<RenderBlock> = overlays
+        let mut blocks: Vec<RenderBlock> = overlays
             .iter()
             .map(|o| RenderBlock::from_overlay(o, page_height, page_width, font_size))
             .collect();
+
+        // Adjust positions to prevent overlapping text
+        adjust_blocks_to_prevent_overlap(&mut blocks);
 
         let mut content = String::new();
 

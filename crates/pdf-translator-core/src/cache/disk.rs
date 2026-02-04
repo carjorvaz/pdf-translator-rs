@@ -25,7 +25,19 @@ impl DiskCache {
         }
 
         let db = sled::open(path).map_err(|e| {
-            Error::CacheInit(format!("Failed to open cache at {}: {}", path.display(), e))
+            let err_str = e.to_string();
+            // Detect lock errors and provide actionable fix
+            if err_str.contains("WouldBlock") || err_str.contains("lock") {
+                Error::CacheInit(format!(
+                    "Cache locked at {}\n\n\
+                    Another process is using the cache, or a previous instance crashed.\n\
+                    To fix: rm {}/db/LOCK",
+                    path.display(),
+                    path.display()
+                ))
+            } else {
+                Error::CacheInit(format!("Failed to open cache at {}: {}", path.display(), e))
+            }
         })?;
 
         debug!("Opened disk cache at {}", path.display());

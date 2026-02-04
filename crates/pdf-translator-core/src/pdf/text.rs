@@ -206,7 +206,69 @@ impl<'a> TextExtractor<'a> {
         // Merge blocks that are split by hyphenation
         let blocks = Self::merge_hyphenated_blocks(blocks);
 
+        // Remove duplicate/overlapping blocks (e.g., from OCR layers)
+        let blocks = Self::deduplicate_overlapping_blocks(blocks);
+
         Ok(blocks)
+    }
+
+    /// Remove blocks that significantly overlap with other blocks.
+    ///
+    /// Some PDFs have duplicate text (e.g., OCR layer + visible text), which
+    /// causes overlapping translations. This keeps only the block with more text
+    /// when two blocks overlap significantly.
+    fn deduplicate_overlapping_blocks(mut blocks: Vec<TextBlock>) -> Vec<TextBlock> {
+        if blocks.len() < 2 {
+            return blocks;
+        }
+
+        // Sort by y0, then by text length descending (prefer longer/more complete blocks)
+        blocks.sort_by(|a, b| {
+            a.bbox
+                .y0
+                .partial_cmp(&b.bbox.y0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.text.len().cmp(&a.text.len()))
+        });
+
+        let mut result: Vec<TextBlock> = Vec::with_capacity(blocks.len());
+
+        for block in blocks {
+            // Check if this block overlaps significantly with any already-kept block
+            let dominated = result.iter().any(|kept| {
+                Self::bboxes_overlap_significantly(&block.bbox, &kept.bbox)
+            });
+
+            if !dominated {
+                result.push(block);
+            }
+        }
+
+        result
+    }
+
+    /// Check if two bounding boxes overlap significantly (>50% of smaller area).
+    fn bboxes_overlap_significantly(a: &BoundingBox, b: &BoundingBox) -> bool {
+        // Calculate intersection
+        let x_overlap = (a.x1.min(b.x1) - a.x0.max(b.x0)).max(0.0);
+        let y_overlap = (a.y1.min(b.y1) - a.y0.max(b.y0)).max(0.0);
+        let intersection = x_overlap * y_overlap;
+
+        if intersection <= 0.0 {
+            return false;
+        }
+
+        // Calculate areas
+        let area_a = a.width() * a.height();
+        let area_b = b.width() * b.height();
+        let smaller_area = area_a.min(area_b);
+
+        if smaller_area <= 0.0 {
+            return false;
+        }
+
+        // Significant overlap if intersection covers >50% of smaller block
+        intersection / smaller_area > 0.5
     }
 
     /// Merge adjacent blocks where one ends with a hyphen and the next continues the word.

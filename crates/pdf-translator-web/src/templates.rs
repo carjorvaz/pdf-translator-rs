@@ -20,9 +20,11 @@
 use askama::Template;
 use askama_web::WebTemplate;
 use pdf_translator_core::{
-    LanguageOption, source_languages, target_languages, flag_for_lang,
+    LanguageOption, source_languages, target_languages,
     DEFAULT_SOURCE_LANG, DEFAULT_TARGET_LANG, DEFAULT_TEXT_COLOR,
 };
+
+use crate::state::ViewMode;
 
 // =============================================================================
 // Full Page Templates
@@ -45,14 +47,21 @@ pub struct AppTemplate {
     pub page: usize,
     pub has_translations: bool,
     pub is_translated: bool,
-    /// Page version for cache-busting (content-based, not time-based)
-    pub version: u64,
     // Language options from single source of truth
     pub source_languages: Vec<LanguageOption>,
     pub target_languages: Vec<LanguageOption>,
     pub default_source: &'static str,
     pub default_target: &'static str,
     pub default_color: &'static str,
+    /// CSS class for the viewer div (derived from view_mode)
+    pub viewer_class: &'static str,
+    /// Whether showing translated-only view (derived from view_mode)
+    pub view_translated_only: bool,
+    /// Whether this is an OOB response (for pagination consolidation)
+    #[allow(dead_code)]
+    pub is_oob: bool,
+    /// Auto-translate on navigation
+    pub auto_translate: bool,
 }
 
 impl AppTemplate {
@@ -64,7 +73,8 @@ impl AppTemplate {
         page: usize,
         is_translated: bool,
         has_translations: bool,
-        version: u64,
+        view_mode: ViewMode,
+        auto_translate: bool,
     ) -> Self {
         Self {
             session_id,
@@ -73,12 +83,15 @@ impl AppTemplate {
             page,
             has_translations,
             is_translated,
-            version,
             source_languages: source_languages(),
             target_languages: target_languages(),
             default_source: DEFAULT_SOURCE_LANG,
             default_target: DEFAULT_TARGET_LANG,
             default_color: DEFAULT_TEXT_COLOR,
+            viewer_class: view_mode.viewer_class(),
+            view_translated_only: view_mode.is_translated_only(),
+            is_oob: false, // Initial page render doesn't use OOB
+            auto_translate,
         }
     }
 
@@ -116,8 +129,12 @@ pub struct ViewerFragmentTemplate {
     pub page_count: usize,
     pub is_translated: bool,
     pub has_any_translations: bool,
-    /// Page version for cache-busting (content-based)
-    pub version: u64,
+    /// CSS class for the viewer div (derived from view_mode)
+    pub viewer_class: &'static str,
+    /// Whether this is an OOB response (for pagination consolidation)
+    pub is_oob: bool,
+    /// Auto-translate on navigation
+    pub auto_translate: bool,
 }
 
 impl ViewerFragmentTemplate {
@@ -128,7 +145,8 @@ impl ViewerFragmentTemplate {
         page_count: usize,
         is_translated: bool,
         has_any_translations: bool,
-        version: u64,
+        view_mode: ViewMode,
+        auto_translate: bool,
     ) -> Self {
         Self {
             session_id,
@@ -136,7 +154,9 @@ impl ViewerFragmentTemplate {
             page_count,
             is_translated,
             has_any_translations,
-            version,
+            viewer_class: view_mode.viewer_class(),
+            is_oob: true, // Fragment responses need OOB swaps
+            auto_translate,
         }
     }
 
@@ -162,16 +182,12 @@ impl ViewerFragmentTemplate {
 /// Translated panel content after successful translation.
 ///
 /// Also used for error display when `is_error` is true.
-/// When `page_changed` is true, includes OOB updates for original image and pagination.
+/// Page is explicit in URL - no page_changed inference needed.
 #[derive(Template, WebTemplate)]
 #[template(path = "partials/translate_result.html")]
 pub struct TranslateResultTemplate {
     pub session_id: String,
     pub page: usize,
-    pub page_count: usize,
-    pub page_changed: bool,
-    /// Page version for cache-busting (content-based)
-    pub version: u64,
     pub is_error: bool,
     /// Used in included template `oob/translate_btn.html` via Askama context
     #[allow(dead_code)]
@@ -180,20 +196,10 @@ pub struct TranslateResultTemplate {
 }
 
 impl TranslateResultTemplate {
-    pub fn success(
-        session_id: String,
-        page: usize,
-        page_count: usize,
-        page_changed: bool,
-        from_cache: bool,
-        version: u64,
-    ) -> Self {
+    pub fn success(session_id: String, page: usize, from_cache: bool) -> Self {
         Self {
             session_id,
             page,
-            page_count,
-            page_changed,
-            version,
             is_error: false,
             is_translated: true, // After successful translation, page is translated
             message: if from_cache {
@@ -205,79 +211,28 @@ impl TranslateResultTemplate {
     }
 
     #[allow(clippy::missing_const_for_fn)] // String fields prevent const
-    pub fn error(
-        session_id: String,
-        page: usize,
-        page_count: usize,
-        page_changed: bool,
-        error: String,
-    ) -> Self {
+    pub fn error(session_id: String, page: usize, error: String) -> Self {
         Self {
             session_id,
             page,
-            page_count,
-            page_changed,
-            version: 0,
             is_error: true,
             is_translated: false, // Don't change button state on error
             message: error,
         }
     }
-
-    /// Helper for pagination prev button (0-based)
-    pub const fn prev_page(&self) -> usize {
-        self.page.saturating_sub(1)
-    }
-
-    /// Helper for pagination next button (0-based)
-    pub fn next_page(&self) -> usize {
-        (self.page + 1).min(self.page_count.saturating_sub(1))
-    }
 }
 
 /// Settings cleared fragment - shows placeholder after settings change.
-///
-/// Includes OOB swaps for flag and swatch indicators so the server
-/// controls all UI state (no client-side JS needed for visual updates).
-#[derive(Template, WebTemplate)]
+#[derive(Template, WebTemplate, Default)]
 #[template(path = "partials/settings_cleared.html")]
-pub struct SettingsClearedTemplate {
-    pub source_flag: &'static str,
-    pub target_flag: &'static str,
-    pub text_color: &'static str,
-}
+pub struct SettingsClearedTemplate;
 
-impl SettingsClearedTemplate {
-    pub fn new(source_lang: &str, target_lang: &str, text_color: &str) -> Self {
-        Self {
-            source_flag: flag_for_lang(source_lang),
-            target_flag: flag_for_lang(target_lang),
-            text_color: color_class(text_color),
-        }
-    }
-}
-
-impl Default for SettingsClearedTemplate {
-    fn default() -> Self {
-        Self {
-            source_flag: flag_for_lang(DEFAULT_SOURCE_LANG),
-            target_flag: flag_for_lang(DEFAULT_TARGET_LANG),
-            text_color: color_class(DEFAULT_TEXT_COLOR),
-        }
-    }
-}
-
-/// Get CSS class for a color name
-#[allow(clippy::match_same_arms)] // Explicit "blue" arm for clarity, default also returns blue
-fn color_class(name: &str) -> &'static str {
-    match name.to_lowercase().as_str() {
-        "darkred" | "dark_red" | "dark-red" => "darkred",
-        "black" => "black",
-        "blue" => "blue",
-        "darkgreen" | "dark_green" | "dark-green" => "darkgreen",
-        "purple" => "purple",
-        _ => "blue",
-    }
+/// Auto-translate toggle response - returns OOB checkbox update.
+#[derive(Template, WebTemplate)]
+#[template(path = "partials/auto_translate_toggle.html")]
+pub struct AutoTranslateToggleTemplate {
+    pub session_id: String,
+    pub auto_translate: bool,
 }
 
 /// Progress bar for translate-all operation.
@@ -294,12 +249,9 @@ pub struct ProgressTemplate {
     pub done: bool,
     pub current_page: usize,
     pub has_error: bool,
-    /// Page version for the current page (for cache-busting translated image)
-    pub version: u64,
 }
 
 impl ProgressTemplate {
-    #[allow(clippy::too_many_arguments)] // All fields needed for template rendering
     #[allow(clippy::missing_const_for_fn)] // String fields prevent const
     pub fn new(
         session_id: String,
@@ -309,7 +261,6 @@ impl ProgressTemplate {
         done: bool,
         current_page: usize,
         has_error: bool,
-        version: u64,
     ) -> Self {
         Self {
             session_id,
@@ -319,7 +270,6 @@ impl ProgressTemplate {
             done,
             current_page,
             has_error,
-            version,
         }
     }
 
@@ -352,6 +302,36 @@ impl ProgressTemplate {
             self.message.clone()
         } else {
             format!("Translated {} pages", self.current)
+        }
+    }
+}
+
+/// View mode toggle response - returns viewer with new class and OOB updates for toggle buttons.
+#[derive(Template, WebTemplate)]
+#[template(path = "partials/view_mode.html")]
+pub struct ViewModeTemplate {
+    pub session_id: String,
+    pub page: usize,
+    pub is_translated: bool,
+    /// CSS class for the viewer div (derived from view_mode)
+    pub viewer_class: &'static str,
+    /// Whether showing translated-only view (derived from view_mode)
+    pub view_translated_only: bool,
+}
+
+impl ViewModeTemplate {
+    pub fn new(
+        session_id: String,
+        page: usize,
+        is_translated: bool,
+        view_mode: ViewMode,
+    ) -> Self {
+        Self {
+            session_id,
+            page,
+            is_translated,
+            viewer_class: view_mode.viewer_class(),
+            view_translated_only: view_mode.is_translated_only(),
         }
     }
 }
