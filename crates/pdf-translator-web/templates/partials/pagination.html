@@ -1,24 +1,33 @@
 {# Pagination controls - prev/next buttons and page input #}
 {# URLs use 1-based page numbers for better UX (page 1 = first page) #}
-{# Page input uses HTMX directly - no JavaScript needed #}
-<div id="pagination" class="pagination">
+{# Prev/next use replace-url to avoid bloating history; input uses push-url for deliberate jumps #}
+{# Preload extension prefetches content on mouseover for faster perceived navigation #}
+<div id="pagination"{% if is_oob %} hx-swap-oob="true"{% endif %} class="pagination" role="navigation" aria-label="Page navigation">
     <button type="button" class="btn btn-secondary"
             hx-get="/api/page-view/{{ session_id }}/{{ self.prev_page() + 1 }}"
             hx-target="#viewer"
             hx-swap="outerHTML"
-            hx-push-url="/view/{{ session_id }}/{{ self.prev_page() + 1 }}"
-            {% if page == 0 %}disabled{% endif %}>←</button>
-    <input type="number" name="page" class="page-input" min="1" max="{{ page_count }}" value="{{ page + 1 }}"
+            hx-replace-url="/view/{{ session_id }}/{{ self.prev_page() + 1 }}"
+                        preload="mouseover"
+            aria-label="Previous page"
+            {% if page == 0 %}disabled aria-disabled="true"{% endif %}>←</button>
+    <input type="number" name="page" class="page-input"
+           min="1" max="{{ page_count }}" value="{{ page + 1 }}"
+           required inputmode="numeric" autocomplete="off"
+           aria-label="Page number"
            hx-get="/api/page-view/{{ session_id }}"
            hx-trigger="keyup[key=='Enter']"
            hx-target="#viewer"
            hx-swap="outerHTML"
-           hx-include="this">
+           hx-push-url="true"
+                      hx-include="this">
     <span>/ {{ page_count }}</span>
     <button type="button" class="btn btn-secondary"
             hx-get="/api/page-view/{{ session_id }}/{{ self.next_page() + 1 }}"
             hx-target="#viewer"
             hx-swap="outerHTML"
-            hx-push-url="/view/{{ session_id }}/{{ self.next_page() + 1 }}"
-            {% if page >= page_count - 1 %}disabled{% endif %}>→</button>
+            hx-replace-url="/view/{{ session_id }}/{{ self.next_page() + 1 }}"
+                        preload="mouseover"
+            aria-label="Next page"
+            {% if page >= page_count - 1 %}disabled aria-disabled="true"{% endif %}>→</button>
 </div>

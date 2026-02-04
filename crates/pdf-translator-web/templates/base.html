@@ -5,13 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}PDF Translator{% endblock %}</title>
     <script src="/static/htmx.min.js"></script>
-    <script src="/static/sse.js"></script>
+    <script src="/static/hyperscript.min.js"></script>
+    <script src="/static/preload.js"></script>
     <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
-    {% block content %}{% endblock %}
-    <div id="toast" class="{% block toast_class %}{% endblock %}">{% block toast %}{% endblock %}</div>
-    <script src="/static/app.js"></script>
+<body hx-ext="preload" hx-boost="true">
+    <noscript>
+        <div class="noscript-warning" role="alert">This application requires JavaScript for translation features.</div>
+    </noscript>
+    <a href="#main-content" class="skip-link">Skip to main content</a>
+    <main id="main-content">
+        {% block content %}{% endblock %}
+    </main>
+    <div id="toast" class="{% block toast_class %}{% endblock %}" role="status" aria-live="polite">{% block toast %}{% endblock %}</div>
     {% block scripts %}{% endblock %}
 </body>
 </html>

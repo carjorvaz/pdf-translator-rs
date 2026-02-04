@@ -57,6 +57,17 @@ impl PdfTranslator {
         })
     }
 
+    /// Create with a shared cache (for cache sharing across instances)
+    pub fn with_cache(config: AppConfig, cache: TranslationCache) -> Result<Self> {
+        let translator = create_translator(&config.translator)?;
+
+        Ok(Self {
+            translator,
+            cache,
+            config,
+        })
+    }
+
     /// Create with a custom translator
     pub fn with_translator(
         translator: Arc<dyn Translator>,
@@ -77,7 +88,7 @@ impl PdfTranslator {
         doc: &PdfDocument,
         page_num: usize,
     ) -> Result<TranslatedPage> {
-        self.translate_page_impl(doc, page_num, false).await
+        self.translate_page_impl(doc, page_num, false, None).await
     }
 
     /// Translate a single page, optionally bypassing cache
@@ -87,7 +98,16 @@ impl PdfTranslator {
         page_num: usize,
         force: bool,
     ) -> Result<TranslatedPage> {
-        self.translate_page_impl(doc, page_num, force).await
+        self.translate_page_impl(doc, page_num, force, None).await
+    }
+
+    /// Translate a page as a prefetch (logged differently)
+    pub async fn translate_page_prefetch(
+        &self,
+        doc: &PdfDocument,
+        page_num: usize,
+    ) -> Result<TranslatedPage> {
+        self.translate_page_impl(doc, page_num, false, Some("(prefetch)")).await
     }
 
     /// Internal implementation of translate_page
@@ -96,6 +116,7 @@ impl PdfTranslator {
         doc: &PdfDocument,
         page_num: usize,
         force: bool,
+        label: Option<&str>,
     ) -> Result<TranslatedPage> {
         // Extract text for cache key
         let extractor = pdf::TextExtractor::new(doc);
@@ -122,7 +143,13 @@ impl PdfTranslator {
             });
         }
 
-        info!("Translating page {} with {}{}", page_num, self.translator.name(), if force { " (forced)" } else { "" });
+        info!(
+            "Translating page {} with {}{}{}",
+            page_num,
+            self.translator.name(),
+            if force { " (forced)" } else { "" },
+            label.unwrap_or("")
+        );
 
         // Extract text blocks
         let blocks = extractor.extract_page_blocks(page_num)?;

@@ -1,46 +1,15 @@
 {# Translation result - shows success with image, or error message #}
 {% if is_error %}
-<div class="placeholder error">Translation failed: {{ message }}</div>
+<div class="placeholder error" role="alert">Translation failed: {{ message }}</div>
 {% else %}
-<img class="page-image" src="/api/page/{{ session_id }}/{{ page }}?translated=1&v={{ version }}" alt="Translated">
+<img class="page-image" src="/api/page/{{ session_id }}/{{ page }}?translated=1" alt="Translated page {{ page + 1 }}" decoding="async">
 {% endif %}
 
 {# Toast notification - auto-dismiss via CSS animation #}
-<div id="toast" hx-swap-oob="true" class="show {% if is_error %}error{% else %}success{% endif %}">{{ message }}</div>
+<div id="toast" hx-swap-oob="true" class="show {% if is_error %}error{% else %}success{% endif %}" role="alert" aria-live="assertive">{{ message }}</div>
 
-{# Enable download button on success #}
+{# OOB updates - always send to keep UI in sync #}
+{% include "oob/translate_btn.html" %}
 {% if !is_error %}
 <a id="download-btn" hx-swap-oob="true" href="/api/download/{{ session_id }}" class="btn btn-success btn-action">Download</a>
-{% endif %}
-
-{# Update translate button state #}
-{% include "oob/translate_btn.html" %}
-
-{# OOB updates when page changed (user typed new page number before clicking translate) #}
-{% if page_changed %}
-{# Update original image to show new page #}
-<img id="original-img" hx-swap-oob="true" class="page-image" src="/api/page/{{ session_id }}/{{ page }}" alt="Original page">
-
-{# Update pagination to reflect new page #}
-<div id="pagination" hx-swap-oob="true" class="pagination">
-    <button type="button" class="btn btn-secondary"
-            hx-get="/api/page-view/{{ session_id }}/{{ self.prev_page() + 1 }}"
-            hx-target="#viewer"
-            hx-swap="outerHTML"
-            hx-push-url="/view/{{ session_id }}/{{ self.prev_page() + 1 }}"
-            {% if page == 0 %}disabled{% endif %}>←</button>
-    <input type="number" name="page" class="page-input" min="1" max="{{ page_count }}" value="{{ page + 1 }}"
-           hx-get="/api/page-view/{{ session_id }}"
-           hx-trigger="keyup[key=='Enter']"
-           hx-target="#viewer"
-           hx-swap="outerHTML"
-           hx-include="this">
-    <span>/ {{ page_count }}</span>
-    <button type="button" class="btn btn-secondary"
-            hx-get="/api/page-view/{{ session_id }}/{{ self.next_page() + 1 }}"
-            hx-target="#viewer"
-            hx-swap="outerHTML"
-            hx-push-url="/view/{{ session_id }}/{{ self.next_page() + 1 }}"
-            {% if page >= page_count - 1 %}disabled{% endif %}>→</button>
-</div>
 {% endif %}

@@ -1,0 +1,8 @@
+{# OOB response for auto-translate toggle - updates the checkbox state #}
+<label id="auto-translate-toggle" class="auto-translate-toggle" hx-swap-oob="true">
+    <input type="checkbox"
+           hx-post="/api/auto-translate/{{ session_id }}"
+           hx-swap="none"
+           {% if auto_translate %}checked{% endif %}>
+    <span>Auto-translate</span>
+</label>

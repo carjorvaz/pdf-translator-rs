@@ -4,7 +4,13 @@
 
 {% block content %}
 <div id="app" class="app active">
-    {% include "partials/toolbar.html" %}
+    <header class="app-header">
+        {% include "partials/toolbar.html" %}
+        <div class="viewer-headers">
+            <div class="panel-header">Original</div>
+            <div class="panel-header">Translated</div>
+        </div>
+    </header>
     <div id="progress-area" class="hidden">
         <div class="progress-bar"><div class="progress-fill" style="width: 0%"></div></div>
         <div class="progress-text"></div>
@@ -16,3 +22,5 @@
 {# Toast class triggers CSS animation for auto-dismiss #}
 {% block toast_class %}show success{% endblock %}
 {% block toast %}PDF loaded{% endblock %}
+
+{% block scripts %}<script src="/static/sse.js"></script>{% endblock %}
