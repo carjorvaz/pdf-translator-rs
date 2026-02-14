@@ -13,6 +13,8 @@ pub struct PdfDocument {
     metadata: DocumentMetadata,
     /// Number of pages
     page_count: usize,
+    /// Content-based cache ID (MD5 hex), computed once on load
+    cache_id: String,
 }
 
 /// Document metadata
@@ -56,10 +58,13 @@ impl PdfDocument {
             modification_date: get_meta(MetadataName::ModDate),
         };
 
+        let cache_id = format!("{:x}", md5::compute(&bytes));
+
         Ok(Self {
             bytes: Arc::new(bytes),
             metadata,
             page_count: usize::try_from(page_count).unwrap_or(0),
+            cache_id,
         })
     }
 
@@ -101,16 +106,11 @@ impl PdfDocument {
             .map_err(|e| Error::PdfOpen(format!("Failed to open document: {e}")))
     }
 
-    /// Generate a cache key component from document metadata
-    pub fn cache_id(&self) -> String {
-        let id = format!(
-            "{}_{}_{}_{}",
-            self.metadata.title.as_deref().unwrap_or(""),
-            self.metadata.author.as_deref().unwrap_or(""),
-            self.page_count,
-            self.bytes.len()
-        );
-        format!("{:x}", md5::compute(id.as_bytes()))
+    /// Cache key component derived from document content.
+    ///
+    /// MD5 hash of the PDF bytes, computed once on load.
+    pub fn cache_id(&self) -> &str {
+        &self.cache_id
     }
 }
 
@@ -124,6 +124,7 @@ impl Clone for PdfDocument {
             bytes: Arc::clone(&self.bytes),
             metadata: self.metadata.clone(),
             page_count: self.page_count,
+            cache_id: self.cache_id.clone(),
         }
     }
 }

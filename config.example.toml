@@ -29,8 +29,8 @@ retry_delay_ms = 1000
 [cache]
 # Enable memory cache
 memory_enabled = true
-# Maximum memory cache entries
-memory_max_entries = 1000
+# Maximum memory cache size in MB
+memory_max_mb = 512
 # Memory cache TTL in seconds (0 = no expiry)
 memory_ttl_seconds = 0
 

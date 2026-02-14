@@ -10,7 +10,7 @@ fn main() {
     println!("Input PDF size: {} bytes", pdf_bytes.len());
     
     // Create overlay with test text
-    let overlay = PdfOverlay::new(OverlayOptions::default()).expect("Failed to create overlay");
+    let overlay = PdfOverlay::new(OverlayOptions::default());
     
     let test_overlays = vec![
         TranslationOverlay {

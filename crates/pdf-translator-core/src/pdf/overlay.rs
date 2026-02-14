@@ -41,9 +41,6 @@ const DEFAULT_FONT_SIZE: f32 = 13.0;
 /// Line height as a multiple of font size.
 const LINE_HEIGHT_FACTOR: f32 = 1.25;
 
-/// Average character width as a fraction of font size for Noto Serif.
-const CHAR_WIDTH_FACTOR: f32 = 0.55;
-
 const RECT_LEFT_PADDING: f32 = 5.0;
 const RECT_RIGHT_PADDING: f32 = 10.0;
 const RECT_TOP_PADDING: f32 = 3.0;
@@ -112,6 +109,7 @@ impl RenderBlock {
         page_height: f32,
         page_width: f32,
         font_size: f32,
+        font: &EmbeddedFont,
     ) -> Self {
         let x = overlay.bbox.x0;
         // Convert Y: PDF has origin at bottom-left, MuPDF at top-left
@@ -119,23 +117,20 @@ impl RenderBlock {
         let original_width = overlay.bbox.x1 - overlay.bbox.x0;
         let original_height = overlay.bbox.y1 - overlay.bbox.y0;
 
-        // Calculate max width for word wrapping
+        // Calculate max width for word wrapping (in points)
         let max_width = (page_width - x - PAGE_RIGHT_MARGIN).max(100.0);
 
-        // Word wrap the text
-        let char_width = font_size * CHAR_WIDTH_FACTOR;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let max_chars = (max_width / char_width).floor().max(10.0) as usize;
-        let lines = word_wrap(&overlay.translated, max_chars);
+        // Word wrap using actual glyph metrics
+        let lines = word_wrap(&overlay.translated, max_width, font, font_size);
 
         // Calculate rendered dimensions
         let line_height = font_size * LINE_HEIGHT_FACTOR;
         #[allow(clippy::cast_precision_loss)]
         let text_height = lines.len() as f32 * line_height;
 
-        let longest_line_chars = lines.iter().map(|l| l.len()).max().unwrap_or(0);
-        #[allow(clippy::cast_precision_loss)]
-        let rendered_width = longest_line_chars as f32 * char_width;
+        let rendered_width = lines.iter()
+            .map(|l| font.string_width(l, font_size))
+            .fold(0.0_f32, f32::max);
 
         // Rectangle covers original text area (minimum) or rendered text (if wider)
         let rect_width = original_width.max(rendered_width) + RECT_LEFT_PADDING + RECT_RIGHT_PADDING;
@@ -159,11 +154,15 @@ impl RenderBlock {
         }
     }
 
-    /// Calculate the Y position of the bottom of the last line of text.
+    /// Calculate the visual bottom Y position of the rendered text.
+    ///
+    /// Uses `num_lines * line_height` (rather than `(num_lines - 1) * line_height`)
+    /// to account for the full extent of the last line below its baseline
+    /// (descenders, plus the ascender space of any following block).
     fn text_bottom_y(&self) -> f32 {
         let num_lines = self.lines.len().max(1);
         #[allow(clippy::cast_precision_loss)]
-        let offset = (num_lines - 1) as f32 * self.line_height;
+        let offset = num_lines as f32 * self.line_height;
         self.text_start_y - offset
     }
 }
@@ -229,32 +228,31 @@ fn adjust_blocks_to_prevent_overlap(blocks: &mut [RenderBlock]) {
 pub struct PdfOverlay {
     /// Configuration options for overlay creation
     pub options: OverlayOptions,
-    /// Embedded font for Unicode text rendering
-    font: EmbeddedFont,
 }
 
 impl PdfOverlay {
     /// Create a new overlay creator with the given options.
-    pub fn new(options: OverlayOptions) -> Result<Self> {
-        let font = EmbeddedFont::new()?;
-        Ok(Self { options, font })
+    pub fn new(options: OverlayOptions) -> Self {
+        Self { options }
     }
 
-    /// Apply overlays to a PDF document.
-    /// Returns the modified PDF bytes.
+    /// Apply overlays to a single page and return a single-page PDF.
     pub fn apply_overlays(
         &self,
         pdf_bytes: &[u8],
         page_num: usize,
         overlays: &[TranslationOverlay],
     ) -> Result<Vec<u8>> {
+        let font = EmbeddedFont::global();
+
         let mut doc = Document::load_mem(pdf_bytes)
             .map_err(|e| Error::Lopdf(format!("Failed to load PDF: {e}")))?;
 
         let pages = doc.get_pages();
         let page_index = PageIndex::try_from_page_num(page_num, pages.len())?;
+        let target_page_num = page_index.as_lopdf_page_number();
 
-        let page_id = pages.get(&page_index.as_lopdf_page_number()).ok_or(Error::PdfInvalidPage {
+        let page_id = pages.get(&target_page_num).ok_or(Error::PdfInvalidPage {
             page: page_num,
             total: pages.len(),
         })?;
@@ -266,13 +264,16 @@ impl PdfOverlay {
         let media_box = get_media_box(&doc, page_obj)?;
 
         // Embed the Unicode font in the document
-        self.font.embed_in_document(&mut doc, page_id)?;
+        font.embed_in_document(&mut doc, page_id)?;
 
         // Create content stream for overlays
         let overlay_content = self.create_overlay_content(overlays, &media_box);
 
         // Append to page content
         Self::append_content_to_page(&mut doc, page_id, &overlay_content)?;
+
+        // Strip all pages except the target to produce a single-page PDF
+        keep_single_page(&mut doc, page_id)?;
 
         // Save document
         let mut output = Vec::new();
@@ -296,6 +297,7 @@ impl PdfOverlay {
     fn create_overlay_content(&self, overlays: &[TranslationOverlay], media_box: &[f32; 4]) -> String {
         use std::fmt::Write;
 
+        let font = EmbeddedFont::global();
         let page_width = media_box[2] - media_box[0];
         let page_height = media_box[3] - media_box[1];
         let font_size = self.options.font_size.unwrap_or(DEFAULT_FONT_SIZE);
@@ -303,7 +305,7 @@ impl PdfOverlay {
         // Convert overlays to render blocks
         let mut blocks: Vec<RenderBlock> = overlays
             .iter()
-            .map(|o| RenderBlock::from_overlay(o, page_height, page_width, font_size))
+            .map(|o| RenderBlock::from_overlay(o, page_height, page_width, font_size, font))
             .collect();
 
         // Adjust positions to prevent overlapping text
@@ -342,7 +344,7 @@ impl PdfOverlay {
                 content.push_str("BT\n");
                 let _ = writeln!(content, "/FTrans {} Tf", block.font_size);
                 let _ = writeln!(content, "{} {} Td", block.text_x, y);
-                let hex_glyphs = self.font.text_to_hex_glyphs(line);
+                let hex_glyphs = font.text_to_hex_glyphs(line);
                 let _ = writeln!(content, "<{hex_glyphs}> Tj");
                 content.push_str("ET\n");
             }
@@ -400,28 +402,56 @@ impl PdfOverlay {
 // =============================================================================
 
 /// Get media box from page object.
+///
+/// Handles both inline and indirect (referenced) MediaBox arrays, and
+/// walks up the Pages tree with a depth limit to prevent infinite
+/// recursion on malformed PDFs.
 fn get_media_box(doc: &Document, page_obj: &Object) -> Result<[f32; 4]> {
-    if let Object::Dictionary(dict) = page_obj {
-        if let Ok(Object::Array(arr)) = dict.get(b"MediaBox")
-            && arr.len() == 4 {
-                let values: Vec<f32> = arr
-                    .iter()
-                    .filter_map(|o| match o {
-                        #[allow(clippy::cast_precision_loss)]
-                        Object::Integer(i) => Some(*i as f32),
-                        Object::Real(r) => Some(*r),
-                        _ => None,
-                    })
-                    .collect();
+    get_media_box_recursive(doc, page_obj, 10)
+}
 
-                if values.len() == 4 {
-                    return Ok([values[0], values[1], values[2], values[3]]);
+fn get_media_box_recursive(doc: &Document, page_obj: &Object, depth: usize) -> Result<[f32; 4]> {
+    if depth == 0 {
+        return Ok([0.0, 0.0, 612.0, 792.0]);
+    }
+
+    if let Object::Dictionary(dict) = page_obj {
+        if let Ok(media_box_obj) = dict.get(b"MediaBox") {
+            // Resolve indirect reference if needed
+            let arr = match media_box_obj {
+                Object::Array(arr) => Some(arr),
+                Object::Reference(ref_id) => {
+                    if let Ok(Object::Array(arr)) = doc.get_object(*ref_id) {
+                        Some(arr)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+
+            if let Some(arr) = arr {
+                if arr.len() == 4 {
+                    let values: Vec<f32> = arr
+                        .iter()
+                        .filter_map(|o| match o {
+                            #[allow(clippy::cast_precision_loss)]
+                            Object::Integer(i) => Some(*i as f32),
+                            Object::Real(r) => Some(*r),
+                            _ => None,
+                        })
+                        .collect();
+
+                    if values.len() == 4 {
+                        return Ok([values[0], values[1], values[2], values[3]]);
+                    }
                 }
             }
+        }
 
         if let Ok(Object::Reference(parent_id)) = dict.get(b"Parent")
             && let Ok(parent) = doc.get_object(*parent_id) {
-                return get_media_box(doc, parent);
+                return get_media_box_recursive(doc, parent, depth - 1);
             }
     }
 
@@ -429,20 +459,91 @@ fn get_media_box(doc: &Document, page_obj: &Object) -> Result<[f32; 4]> {
     Ok([0.0, 0.0, 612.0, 792.0])
 }
 
-/// Word wrap text to fit within max_chars per line.
-fn word_wrap(text: &str, max_chars: usize) -> Vec<String> {
+/// Restructure a document to contain only a single page.
+///
+/// Modifies the Pages tree to reference only the target page,
+/// making this a single-page PDF for efficient storage and combining.
+fn keep_single_page(doc: &mut Document, target_page_id: ObjectId) -> Result<()> {
+    // Find the root catalog
+    let root_ref = doc.trailer.get(b"Root")
+        .map_err(|e| Error::Lopdf(format!("No Root in trailer: {e}")))?;
+
+    let catalog_id = match root_ref {
+        Object::Reference(id) => *id,
+        _ => return Err(Error::Lopdf("Root is not a reference".to_string())),
+    };
+
+    let pages_id = {
+        let catalog = doc.get_object(catalog_id)
+            .map_err(|e| Error::Lopdf(format!("Failed to get catalog: {e}")))?;
+        match catalog {
+            Object::Dictionary(dict) => match dict.get(b"Pages") {
+                Ok(Object::Reference(id)) => *id,
+                _ => return Err(Error::Lopdf("Catalog has no Pages reference".to_string())),
+            },
+            _ => return Err(Error::Lopdf("Catalog is not a dictionary".to_string())),
+        }
+    };
+
+    // Update the Pages tree to only contain the target page
+    if let Ok(Object::Dictionary(pages_dict)) = doc.get_object_mut(pages_id) {
+        pages_dict.set("Kids", Object::Array(vec![Object::Reference(target_page_id)]));
+        pages_dict.set("Count", Object::Integer(1));
+    }
+
+    // Update the page's Parent to point to the Pages node
+    if let Ok(Object::Dictionary(page_dict)) = doc.get_object_mut(target_page_id) {
+        page_dict.set("Parent", Object::Reference(pages_id));
+    }
+
+    Ok(())
+}
+
+/// Word wrap text to fit within `max_width` points, using actual glyph metrics.
+///
+/// Words wider than `max_width` are broken at character boundaries.
+fn word_wrap(text: &str, max_width: f32, font: &EmbeddedFont, font_size: f32) -> Vec<String> {
+    let space_width = font.string_width(" ", font_size);
     let mut lines = Vec::new();
     let mut current_line = String::new();
+    let mut current_width: f32 = 0.0;
 
     for word in text.split_whitespace() {
+        let word_width = font.string_width(word, font_size);
+
+        // Break overlong words at character boundaries
+        if word_width > max_width {
+            if !current_line.is_empty() {
+                lines.push(current_line);
+            }
+            let mut chunk = String::new();
+            let mut chunk_width: f32 = 0.0;
+            for c in word.chars() {
+                let char_width = font.string_width(c.encode_utf8(&mut [0; 4]), font_size);
+                if chunk_width + char_width > max_width && !chunk.is_empty() {
+                    lines.push(chunk);
+                    chunk = String::new();
+                    chunk_width = 0.0;
+                }
+                chunk.push(c);
+                chunk_width += char_width;
+            }
+            current_line = chunk;
+            current_width = chunk_width;
+            continue;
+        }
+
         if current_line.is_empty() {
             current_line = word.to_string();
-        } else if current_line.len() + 1 + word.len() <= max_chars {
+            current_width = word_width;
+        } else if current_width + space_width + word_width <= max_width {
             current_line.push(' ');
             current_line.push_str(word);
+            current_width += space_width + word_width;
         } else {
             lines.push(current_line);
             current_line = word.to_string();
+            current_width = word_width;
         }
     }
 
@@ -626,18 +727,32 @@ mod tests {
 
     #[test]
     fn test_word_wrap_basic() {
-        let lines = word_wrap("Hello world this is a test", 10);
-        assert_eq!(lines.len(), 3);
-        assert_eq!(lines[0], "Hello");
-        assert_eq!(lines[1], "world this");
-        assert_eq!(lines[2], "is a test");
+        let font = EmbeddedFont::global();
+        // Use a narrow width that forces wrapping
+        let width = font.string_width("Hello world this", 13.0);
+        let lines = word_wrap("Hello world this is a test", width, font, 13.0);
+        assert!(lines.len() >= 2, "text should wrap into multiple lines");
+        // All words should be preserved
+        let joined: String = lines.join(" ");
+        assert_eq!(joined, "Hello world this is a test");
     }
 
     #[test]
     fn test_word_wrap_empty() {
-        let lines = word_wrap("", 10);
+        let font = EmbeddedFont::global();
+        let lines = word_wrap("", 200.0, font, 13.0);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0], "");
+    }
+
+    #[test]
+    fn test_word_wrap_long_word() {
+        let font = EmbeddedFont::global();
+        // Very narrow width forces character-level breaking
+        let lines = word_wrap("Superlongword", 40.0, font, 13.0);
+        assert!(lines.len() >= 2, "long word should be broken across lines");
+        let joined: String = lines.concat();
+        assert_eq!(joined, "Superlongword");
     }
 
     #[test]

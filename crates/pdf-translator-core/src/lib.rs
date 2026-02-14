@@ -118,17 +118,25 @@ impl PdfTranslator {
         force: bool,
         label: Option<&str>,
     ) -> Result<TranslatedPage> {
-        // Extract text for cache key
+        // Extract text blocks (single PDF parse, used for both cache key and translation)
         let extractor = pdf::TextExtractor::new(doc);
-        let page_text = extractor.get_page_text(page_num)?;
+        let blocks = extractor.extract_page_blocks(page_num)?;
+
+        // Derive plain text for cache key from extracted blocks
+        let page_text: String = blocks.iter()
+            .map(|b| b.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
 
         // Generate cache key
         let cache_key = CacheKey::from_page(
-            &doc.cache_id(),
+            doc.cache_id(),
             page_num,
             &page_text,
             self.translator.name(),
+            &self.config.source_lang,
             &self.config.target_lang,
+            self.config.text_color,
         );
 
         // Check cache (unless force is set)
@@ -150,9 +158,6 @@ impl PdfTranslator {
             if force { " (forced)" } else { "" },
             label.unwrap_or("")
         );
-
-        // Extract text blocks
-        let blocks = extractor.extract_page_blocks(page_num)?;
 
         // Translate each block
         let mut overlays = Vec::with_capacity(blocks.len());
@@ -180,7 +185,7 @@ impl PdfTranslator {
             ..Default::default()
         };
 
-        let overlay = PdfOverlay::new(overlay_options)?;
+        let overlay = PdfOverlay::new(overlay_options);
         let pdf_bytes = overlay.create_translated_page(doc.bytes(), page_num, &overlays)?;
 
         // Store in cache

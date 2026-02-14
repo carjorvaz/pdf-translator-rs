@@ -3,7 +3,7 @@ use pdf_translator_core::{
     AppConfig, Lang, PdfDocument, PdfTranslator, TextColor, TranslatorConfig,
     TranslationCache, DEFAULT_SOURCE_LANG, DEFAULT_TARGET_LANG, DEFAULT_TEXT_COLOR,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -23,6 +23,8 @@ pub struct Session {
     pub translate_job: Option<Arc<TranslateJob>>,
     /// Currently viewed page (for restoring state)
     pub current_page: usize,
+    /// Pages currently being translated (prevents duplicate prefetch API calls)
+    pub in_flight: HashSet<usize>,
 }
 
 /// Progress tracking for translate-all jobs
@@ -150,6 +152,7 @@ impl AppState {
             created_at: std::time::Instant::now(),
             translate_job: None,
             current_page: 0,
+            in_flight: HashSet::new(),
         };
 
         self.sessions.write().await.insert(id, session);

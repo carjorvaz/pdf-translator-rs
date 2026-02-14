@@ -50,7 +50,17 @@ pub async fn download_pdf(
         )
     })?;
 
-    let download_name = format!("translated_{filename}");
+    // Sanitize filename: strip path separators, control chars, and quotes
+    let safe_filename: String = filename
+        .chars()
+        .filter(|c| !c.is_control() && *c != '"' && *c != '/' && *c != '\\')
+        .collect();
+    let safe_filename = if safe_filename.is_empty() {
+        "document.pdf".to_string()
+    } else {
+        safe_filename
+    };
+    let download_name = format!("translated_{safe_filename}");
 
     Response::builder()
         .status(StatusCode::OK)
