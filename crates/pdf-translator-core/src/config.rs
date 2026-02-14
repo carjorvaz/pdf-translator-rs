@@ -169,9 +169,9 @@ pub struct CacheConfig {
     #[serde(default = "default_true")]
     pub memory_enabled: bool,
 
-    /// Maximum memory cache entries
-    #[serde(default = "default_memory_max_entries")]
-    pub memory_max_entries: u64,
+    /// Maximum memory cache size in megabytes
+    #[serde(default = "default_memory_max_mb")]
+    pub memory_max_mb: u64,
 
     /// Memory cache TTL in seconds (0 = no expiry)
     #[serde(default)]
@@ -189,15 +189,15 @@ const fn default_true() -> bool {
     true
 }
 
-const fn default_memory_max_entries() -> u64 {
-    1000
+const fn default_memory_max_mb() -> u64 {
+    512
 }
 
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             memory_enabled: true,
-            memory_max_entries: 1000,
+            memory_max_mb: 512,
             memory_ttl_seconds: 0,
             disk_enabled: true,
             disk_path: None,

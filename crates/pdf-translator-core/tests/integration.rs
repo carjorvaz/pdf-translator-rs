@@ -221,11 +221,12 @@ async fn test_cache_key_uniqueness() {
     let lang_en = Lang::new("en");
     let lang_fr = Lang::new("fr");
 
-    let key1 = CacheKey::from_page("doc1", 0, "Hello", "mock", &lang_en);
-    let key2 = CacheKey::from_page("doc1", 0, "Hello", "mock", &lang_en);
-    let key3 = CacheKey::from_page("doc1", 1, "Hello", "mock", &lang_en);
-    let key4 = CacheKey::from_page("doc1", 0, "World", "mock", &lang_en);
-    let key5 = CacheKey::from_page("doc1", 0, "Hello", "mock", &lang_fr);
+    let color = pdf_translator_core::TextColor::default();
+    let key1 = CacheKey::from_page("doc1", 0, "Hello", "mock", &lang_fr, &lang_en, color);
+    let key2 = CacheKey::from_page("doc1", 0, "Hello", "mock", &lang_fr, &lang_en, color);
+    let key3 = CacheKey::from_page("doc1", 1, "Hello", "mock", &lang_fr, &lang_en, color);
+    let key4 = CacheKey::from_page("doc1", 0, "World", "mock", &lang_fr, &lang_en, color);
+    let key5 = CacheKey::from_page("doc1", 0, "Hello", "mock", &lang_en, &lang_fr, color);
 
     // Same inputs should produce same key
     assert_eq!(key1.as_str(), key2.as_str());
@@ -248,7 +249,7 @@ async fn test_cache_key_uniqueness() {
 fn test_overlay_creates_valid_pdf() {
     let doc = load_test_pdf();
     let options = OverlayOptions::default();
-    let overlay = PdfOverlay::new(options).expect("Should create overlay");
+    let overlay = PdfOverlay::new(options);
 
     // Create overlay with empty translations (just tests PDF manipulation)
     let result = overlay.create_translated_page(doc.bytes(), 0, &[]);
@@ -265,7 +266,7 @@ fn test_overlay_creates_valid_pdf() {
 fn test_overlay_with_translation() {
     let doc = load_test_pdf();
     let options = OverlayOptions::default();
-    let overlay = PdfOverlay::new(options).expect("Should create overlay");
+    let overlay = PdfOverlay::new(options);
 
     // Create a simple translation overlay
     let overlays = vec![
@@ -327,7 +328,7 @@ fn test_render_page_webp() {
 fn test_invalid_page_number() {
     let doc = load_test_pdf();
     let options = OverlayOptions::default();
-    let overlay = PdfOverlay::new(options).expect("Should create overlay");
+    let overlay = PdfOverlay::new(options);
 
     // Try to access a page that doesn't exist
     let page_count = doc.page_count();

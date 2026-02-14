@@ -86,12 +86,13 @@ pub async fn get_page_image(
             let pdf_bytes = tokio::fs::read(&path).await.or_internal_error()?;
 
             // Parse and render in blocking task to avoid blocking async runtime
+            // Translated PDFs are single-page (via keep_single_page), so always render page 0
             let image_data = tokio::task::spawn_blocking(move || {
                 let doc = PdfDocument::from_bytes(pdf_bytes)?;
                 if use_webp {
-                    render_page_webp(&doc, page, scale)
+                    render_page_webp(&doc, 0, scale)
                 } else {
-                    render_page(&doc, page, scale)
+                    render_page(&doc, 0, scale)
                 }
             })
             .await

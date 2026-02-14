@@ -76,12 +76,12 @@ pub async fn translate_page(
             // Write to disk outside lock (async)
             if let Err(e) = tokio::fs::write(&path, &result.pdf_bytes).await {
                 error!("Failed to store translated page: {}", e);
+            } else {
+                // Mark stored inside lock (fast) — only if write succeeded
+                session_ref
+                    .with_session_mut(|s| s.page_store.mark_stored(page))
+                    .await;
             }
-
-            // Mark stored inside lock (fast)
-            session_ref
-                .with_session_mut(|s| s.page_store.mark_stored(page))
-                .await;
 
             // Server-initiated prefetch: queue next 2 pages in background
             // This is cleaner than client-side hidden divs triggering requests
@@ -123,16 +123,20 @@ async fn prefetch_page_internal(
         return;
     };
 
-    // Check if translation needed (inside lock - fast metadata ops)
+    // Check if translation needed and claim the in-flight slot (inside lock)
     let data = session_ref
-        .with_session(|s| {
-            if page >= s.document.page_count() || s.page_store.has_page(page) {
+        .with_session_mut(|s| {
+            if page >= s.document.page_count()
+                || s.page_store.has_page(page)
+                || s.in_flight.contains(&page)
+            {
                 debug!(
-                    "Prefetch skipped for page {}: already done or out of range",
+                    "Prefetch skipped for page {}: already done, in-flight, or out of range",
                     page
                 );
-                None // Out of range or already translated
+                None // Out of range, already translated, or already in-flight
             } else {
+                s.in_flight.insert(page);
                 Some((
                     s.settings.clone(),
                     s.document.clone(),
@@ -150,20 +154,31 @@ async fn prefetch_page_internal(
 
     // Create translator and translate (outside lock - slow async ops)
     let Ok(translator) = state.create_translator(&settings) else {
+        // Release in-flight claim on error
+        session_ref.with_session_mut(|s| { s.in_flight.remove(&page); }).await;
         return;
     };
 
-    let Ok(result) = translator.translate_page_prefetch(&doc, page).await else {
-        return;
-    };
+    let result = translator.translate_page_prefetch(&doc, page).await;
 
-    // Store result (async I/O outside lock)
-    if tokio::fs::write(&path, &result.pdf_bytes).await.is_ok() {
-        // Mark stored (inside lock - fast)
-        session_ref
-            .with_session_mut(|s| s.page_store.mark_stored(page))
-            .await;
-        debug!("Prefetch completed for page {}", page);
+    // Release in-flight claim and store result
+    match result {
+        Ok(result) => {
+            if tokio::fs::write(&path, &result.pdf_bytes).await.is_ok() {
+                session_ref
+                    .with_session_mut(|s| {
+                        s.page_store.mark_stored(page);
+                        s.in_flight.remove(&page);
+                    })
+                    .await;
+                debug!("Prefetch completed for page {}", page);
+            } else {
+                session_ref.with_session_mut(|s| { s.in_flight.remove(&page); }).await;
+            }
+        }
+        Err(_) => {
+            session_ref.with_session_mut(|s| { s.in_flight.remove(&page); }).await;
+        }
     }
 }
 

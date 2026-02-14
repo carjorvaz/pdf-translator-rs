@@ -13,6 +13,8 @@
 //!     - **FontFile2**: The embedded TrueType font program
 //!   - **ToUnicode CMap**: Maps glyph IDs back to Unicode for copy/paste
 
+use std::sync::LazyLock;
+
 use lopdf::{Document, Object, ObjectId, Stream};
 use ttf_parser::Face;
 
@@ -23,6 +25,11 @@ use crate::error::{Error, Result};
 /// with excellent Unicode coverage across Latin, Cyrillic, and Greek scripts.
 const NOTO_SERIF: &[u8] = include_bytes!("../../assets/NotoSerif-Regular.ttf");
 
+/// Global font instance, parsed once on first use.
+static GLOBAL_FONT: LazyLock<EmbeddedFont> = LazyLock::new(|| {
+    EmbeddedFont::new().expect("Failed to parse embedded Noto Serif font")
+});
+
 /// Handles TrueType font embedding in PDFs.
 pub struct EmbeddedFont {
     face: Face<'static>,
@@ -30,10 +37,15 @@ pub struct EmbeddedFont {
 
 impl EmbeddedFont {
     /// Create a new embedded font handler.
-    pub fn new() -> Result<Self> {
+    fn new() -> Result<Self> {
         let face = Face::parse(NOTO_SERIF, 0)
             .map_err(|e| Error::PdfOverlay(format!("Failed to parse font: {e}")))?;
         Ok(Self { face })
+    }
+
+    /// Get the global shared font instance.
+    pub fn global() -> &'static Self {
+        &GLOBAL_FONT
     }
 
     /// Get the glyph ID for a character, falling back to .notdef (0) if not found.
@@ -49,13 +61,11 @@ impl EmbeddedFont {
     }
 
     /// Get the font's units per em.
-    #[allow(dead_code)] // May be useful for advanced text layout
     pub fn units_per_em(&self) -> u16 {
         self.face.units_per_em()
     }
 
     /// Calculate the width of a string in PDF points at the given font size.
-    #[allow(dead_code)] // May be useful for advanced text layout
     #[allow(clippy::cast_precision_loss)] // Precision loss acceptable for width calculations
     pub fn string_width(&self, text: &str, font_size: f32) -> f32 {
         let units_per_em = f32::from(self.units_per_em());
@@ -368,7 +378,23 @@ end";
     }
 
     /// Walk up the Pages tree to find inherited Resources.
+    ///
+    /// Uses a depth limit to prevent infinite recursion on malformed PDFs
+    /// with circular Parent references.
     fn resolve_inherited_resources(&self, doc: &Document, parent_obj: &Object) -> Option<lopdf::Dictionary> {
+        self.resolve_inherited_resources_recursive(doc, parent_obj, 10)
+    }
+
+    fn resolve_inherited_resources_recursive(
+        &self,
+        doc: &Document,
+        parent_obj: &Object,
+        depth: usize,
+    ) -> Option<lopdf::Dictionary> {
+        if depth == 0 {
+            return None;
+        }
+
         let parent_id = match parent_obj {
             Object::Reference(id) => *id,
             _ => return None,
@@ -388,7 +414,7 @@ end";
 
         // Continue up the tree
         if let Ok(grandparent_obj) = parent.get(b"Parent") {
-            return self.resolve_inherited_resources(doc, grandparent_obj);
+            return self.resolve_inherited_resources_recursive(doc, grandparent_obj, depth - 1);
         }
 
         None
@@ -402,20 +428,20 @@ mod tests {
 
     #[test]
     fn test_font_loads() {
-        let font = EmbeddedFont::new().unwrap();
+        let font = EmbeddedFont::global();
         assert!(font.units_per_em() > 0);
     }
 
     #[test]
     fn test_glyph_lookup() {
-        let font = EmbeddedFont::new().unwrap();
+        let font = EmbeddedFont::global();
         // Space and 'A' should have valid glyph IDs
         assert!(font.glyph_id(' ') > 0 || font.glyph_id('A') > 0);
     }
 
     #[test]
     fn test_hex_conversion() {
-        let font = EmbeddedFont::new().unwrap();
+        let font = EmbeddedFont::global();
         let hex = font.text_to_hex_glyphs("A");
         // Should be 4 hex digits for one character
         assert_eq!(hex.len(), 4);

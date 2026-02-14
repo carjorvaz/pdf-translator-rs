@@ -61,11 +61,6 @@ impl DiskCache {
             .insert(key.as_bytes(), value)
             .map_err(|e| Error::CacheWrite(e.to_string()))?;
 
-        // Flush to ensure persistence
-        self.db
-            .flush()
-            .map_err(|e| Error::CacheWrite(format!("Flush failed: {e}")))?;
-
         Ok(())
     }
 

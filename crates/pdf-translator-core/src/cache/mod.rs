@@ -29,7 +29,7 @@ impl TranslationCache {
     pub fn new(config: &CacheConfig) -> Result<Self> {
         let memory = if config.memory_enabled {
             Some(MemoryCache::new(
-                config.memory_max_entries,
+                config.memory_max_mb,
                 config.memory_ttl_seconds,
             ))
         } else {
@@ -61,15 +61,25 @@ impl TranslationCache {
                 return Some(value);
             }
 
-        // Try disk cache
-        if let Some(ref disk) = self.inner.disk
-            && let Some(value) = disk.get(&key_str) {
+        // Try disk cache (blocking I/O, offloaded to blocking thread)
+        if self.inner.disk.is_some() {
+            let inner = Arc::clone(&self.inner);
+            let disk_key = key_str.clone();
+            let disk_result = tokio::task::spawn_blocking(move || {
+                inner.disk.as_ref().unwrap().get(&disk_key)
+            })
+            .await
+            .ok()
+            .flatten();
+
+            if let Some(value) = disk_result {
                 // Populate memory cache on disk hit
                 if let Some(ref memory) = self.inner.memory {
                     memory.insert(key_str, value.clone()).await;
                 }
                 return Some(value);
             }
+        }
 
         None
     }
@@ -82,9 +92,17 @@ impl TranslationCache {
             memory.insert(key_str.clone(), value.clone()).await;
         }
 
-        // Store in disk cache
-        if let Some(ref disk) = self.inner.disk {
-            let _ = disk.insert(&key_str, &value);
+        // Store in disk cache (blocking I/O, offloaded to blocking thread)
+        if self.inner.disk.is_some() {
+            let inner = Arc::clone(&self.inner);
+            let disk_key = key_str;
+            let disk_value = value;
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Err(e) = inner.disk.as_ref().unwrap().insert(&disk_key, &disk_value) {
+                    tracing::warn!("Failed to write to disk cache: {e}");
+                }
+            })
+            .await;
         }
     }
 
@@ -98,7 +116,9 @@ impl TranslationCache {
         }
 
         if let Some(ref disk) = self.inner.disk {
-            let _ = disk.clear();
+            if let Err(e) = disk.clear() {
+                tracing::warn!("Failed to clear disk cache: {e}");
+            }
         }
     }
 }
