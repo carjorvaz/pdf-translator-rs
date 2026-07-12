@@ -19,10 +19,7 @@
 
 use askama::Template;
 use askama_web::WebTemplate;
-use pdf_translator_core::{
-    LanguageOption, source_languages, target_languages,
-    DEFAULT_SOURCE_LANG, DEFAULT_TARGET_LANG, DEFAULT_TEXT_COLOR,
-};
+use pdf_translator_core::{LanguageOption, source_languages, target_languages};
 
 use crate::state::ViewMode;
 
@@ -40,6 +37,7 @@ pub struct IndexTemplate;
 /// Displays the dual-panel viewer with toolbar and controls.
 #[derive(Template, WebTemplate)]
 #[template(path = "app.html")]
+#[allow(clippy::struct_excessive_bools)] // Flat Askama context mirrors independent controls.
 pub struct AppTemplate {
     pub session_id: String,
     pub filename: String,
@@ -50,13 +48,15 @@ pub struct AppTemplate {
     // Language options from single source of truth
     pub source_languages: Vec<LanguageOption>,
     pub target_languages: Vec<LanguageOption>,
-    pub default_source: &'static str,
-    pub default_target: &'static str,
-    pub default_color: &'static str,
+    pub current_source: String,
+    pub current_target: String,
+    pub current_color: String,
     /// CSS class for the viewer div (derived from view_mode)
     pub viewer_class: &'static str,
     /// Whether showing translated-only view (derived from view_mode)
     pub view_translated_only: bool,
+    /// Stable query value for request-local presentation mode.
+    pub view_mode: &'static str,
     /// Whether this is an OOB response (for pagination consolidation)
     #[allow(dead_code)]
     pub is_oob: bool,
@@ -66,6 +66,7 @@ pub struct AppTemplate {
 
 impl AppTemplate {
     /// Create an app template for a specific page (used for direct URL access).
+    #[allow(clippy::too_many_arguments)] // Explicit server-rendered page state.
     pub fn at_page(
         session_id: String,
         filename: String,
@@ -73,6 +74,9 @@ impl AppTemplate {
         page: usize,
         is_translated: bool,
         has_translations: bool,
+        current_source: String,
+        current_target: String,
+        current_color: String,
         view_mode: ViewMode,
         auto_translate: bool,
     ) -> Self {
@@ -85,11 +89,16 @@ impl AppTemplate {
             is_translated,
             source_languages: source_languages(),
             target_languages: target_languages(),
-            default_source: DEFAULT_SOURCE_LANG,
-            default_target: DEFAULT_TARGET_LANG,
-            default_color: DEFAULT_TEXT_COLOR,
+            current_source,
+            current_target,
+            current_color,
             viewer_class: view_mode.viewer_class(),
             view_translated_only: view_mode.is_translated_only(),
+            view_mode: if view_mode.is_translated_only() {
+                "translated"
+            } else {
+                "both"
+            },
             is_oob: false, // Initial page render doesn't use OOB
             auto_translate,
         }
@@ -97,11 +106,7 @@ impl AppTemplate {
 
     /// Previous page number (clamped to 0). Used in pagination template.
     pub const fn prev_page(&self) -> usize {
-        if self.page > 0 {
-            self.page - 1
-        } else {
-            0
-        }
+        if self.page > 0 { self.page - 1 } else { 0 }
     }
 
     /// Next page number (clamped to last page). Used in pagination template.
@@ -123,6 +128,7 @@ impl AppTemplate {
 /// Includes OOB updates for pagination and buttons.
 #[derive(Template, WebTemplate)]
 #[template(path = "partials/viewer_fragment.html")]
+#[allow(clippy::struct_excessive_bools)] // Flat Askama context mirrors independent controls.
 pub struct ViewerFragmentTemplate {
     pub session_id: String,
     pub page: usize,
@@ -131,6 +137,10 @@ pub struct ViewerFragmentTemplate {
     pub has_any_translations: bool,
     /// CSS class for the viewer div (derived from view_mode)
     pub viewer_class: &'static str,
+    /// Whether showing translated-only view (derived from view_mode).
+    pub view_translated_only: bool,
+    /// Stable query value for request-local presentation mode.
+    pub view_mode: &'static str,
     /// Whether this is an OOB response (for pagination consolidation)
     pub is_oob: bool,
     /// Auto-translate on navigation
@@ -155,6 +165,12 @@ impl ViewerFragmentTemplate {
             is_translated,
             has_any_translations,
             viewer_class: view_mode.viewer_class(),
+            view_translated_only: view_mode.is_translated_only(),
+            view_mode: if view_mode.is_translated_only() {
+                "translated"
+            } else {
+                "both"
+            },
             is_oob: true, // Fragment responses need OOB swaps
             auto_translate,
         }
@@ -162,11 +178,7 @@ impl ViewerFragmentTemplate {
 
     /// Previous page number (clamped to 0). Used in pagination template.
     pub const fn prev_page(&self) -> usize {
-        if self.page > 0 {
-            self.page - 1
-        } else {
-            0
-        }
+        if self.page > 0 { self.page - 1 } else { 0 }
     }
 
     /// Next page number (clamped to last page). Used in pagination template.
@@ -192,16 +204,18 @@ pub struct TranslateResultTemplate {
     /// Used in included template `oob/translate_btn.html` via Askama context
     #[allow(dead_code)]
     pub is_translated: bool,
+    pub version: u64,
     pub message: String,
 }
 
 impl TranslateResultTemplate {
-    pub fn success(session_id: String, page: usize, from_cache: bool) -> Self {
+    pub fn success(session_id: String, page: usize, version: u64, from_cache: bool) -> Self {
         Self {
             session_id,
             page,
             is_error: false,
-            is_translated: true, // After successful translation, page is translated
+            is_translated: true,
+            version,
             message: if from_cache {
                 "Loaded from cache".to_string()
             } else {
@@ -211,12 +225,19 @@ impl TranslateResultTemplate {
     }
 
     #[allow(clippy::missing_const_for_fn)] // String fields prevent const
-    pub fn error(session_id: String, page: usize, error: String) -> Self {
+    pub fn error(
+        session_id: String,
+        page: usize,
+        is_translated: bool,
+        version: u64,
+        error: String,
+    ) -> Self {
         Self {
             session_id,
             page,
             is_error: true,
-            is_translated: false, // Don't change button state on error
+            is_translated,
+            version,
             message: error,
         }
     }
@@ -237,8 +258,8 @@ pub struct AutoTranslateToggleTemplate {
 
 /// Progress bar for translate-all operation.
 ///
-/// When `done` is false, includes HTMX polling trigger (will be replaced with SSE).
-/// When `done` is true, includes completion toast and button re-enabling.
+/// The initial response owns the SSE connection; event responses replace only
+/// its stable child so the connection is not repeatedly recreated.
 #[derive(Template, WebTemplate)]
 #[template(path = "partials/progress.html")]
 pub struct ProgressTemplate {
@@ -247,8 +268,8 @@ pub struct ProgressTemplate {
     pub total: usize,
     pub message: String,
     pub done: bool,
-    pub current_page: usize,
     pub has_error: bool,
+    pub connect_sse: bool,
 }
 
 impl ProgressTemplate {
@@ -259,8 +280,8 @@ impl ProgressTemplate {
         total: usize,
         message: String,
         done: bool,
-        current_page: usize,
         has_error: bool,
+        connect_sse: bool,
     ) -> Self {
         Self {
             session_id,
@@ -268,8 +289,8 @@ impl ProgressTemplate {
             total,
             message,
             done,
-            current_page,
             has_error,
+            connect_sse,
         }
     }
 
@@ -282,18 +303,9 @@ impl ProgressTemplate {
         }
     }
 
-    /// Whether to show translated content OOB update.
-    pub const fn show_translated_content(&self) -> bool {
-        self.done && !self.has_error && self.current > self.current_page
-    }
-
     /// Toast type based on state.
     pub const fn toast_type(&self) -> &'static str {
-        if self.has_error {
-            "error"
-        } else {
-            "success"
-        }
+        if self.has_error { "error" } else { "success" }
     }
 
     /// Toast message based on state.
@@ -309,29 +321,133 @@ impl ProgressTemplate {
 /// View mode toggle response - returns viewer with new class and OOB updates for toggle buttons.
 #[derive(Template, WebTemplate)]
 #[template(path = "partials/view_mode.html")]
+#[allow(clippy::struct_excessive_bools)] // Flat Askama context mirrors independent controls.
 pub struct ViewModeTemplate {
     pub session_id: String,
     pub page: usize,
+    pub page_count: usize,
     pub is_translated: bool,
+    pub auto_translate: bool,
     /// CSS class for the viewer div (derived from view_mode)
     pub viewer_class: &'static str,
     /// Whether showing translated-only view (derived from view_mode)
     pub view_translated_only: bool,
+    /// Stable query value for request-local presentation mode.
+    pub view_mode: &'static str,
+    /// Pagination is emitted as an out-of-band refresh.
+    pub is_oob: bool,
 }
 
 impl ViewModeTemplate {
-    pub fn new(
+    pub const fn new(
         session_id: String,
         page: usize,
+        page_count: usize,
         is_translated: bool,
+        auto_translate: bool,
         view_mode: ViewMode,
     ) -> Self {
         Self {
             session_id,
             page,
+            page_count,
             is_translated,
+            auto_translate,
             viewer_class: view_mode.viewer_class(),
             view_translated_only: view_mode.is_translated_only(),
+            view_mode: if view_mode.is_translated_only() {
+                "translated"
+            } else {
+                "both"
+            },
+            is_oob: true,
         }
+    }
+
+    pub const fn prev_page(&self) -> usize {
+        if self.page > 0 { self.page - 1 } else { 0 }
+    }
+
+    pub const fn next_page(&self) -> usize {
+        if self.page + 1 < self.page_count {
+            self.page + 1
+        } else {
+            self.page
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn view_mode_response_preserves_mode_navigation_and_auto_translate() {
+        let html = ViewModeTemplate::new(
+            "session".to_string(),
+            1,
+            3,
+            false,
+            true,
+            ViewMode::TranslatedOnly,
+        )
+        .render()
+        .unwrap();
+
+        assert!(html.contains("?mode=translated"));
+        assert!(html.contains("hx-vals='{\"mode\":\"translated\"}'"));
+        assert!(html.contains("hx-trigger=\"load\""));
+        assert!(html.contains("hx-sync=\"#app:abort\""));
+        assert!(html.contains("id=\"pagination\" hx-swap-oob=\"true\""));
+    }
+
+    #[test]
+    fn progress_response_owns_and_closes_terminal_sse() {
+        let active = ProgressTemplate::new(
+            "session".to_string(),
+            1,
+            2,
+            "Working".to_string(),
+            false,
+            false,
+            true,
+        )
+        .render()
+        .unwrap();
+        assert!(active.contains("sse-swap=\"progress,complete\""));
+        assert!(active.contains("sse-close=\"complete\""));
+
+        let done = ProgressTemplate::new(
+            "session".to_string(),
+            2,
+            2,
+            "Done".to_string(),
+            true,
+            false,
+            false,
+        )
+        .render()
+        .unwrap();
+        assert!(done.contains("add .auto-hide to #progress-area"));
+        assert!(done.contains("hx-boost=\"false\""));
+    }
+
+    #[test]
+    fn translation_result_versions_images_and_preserves_failed_retry_state() {
+        let success = TranslateResultTemplate::success("session".to_string(), 0, 7, false)
+            .render()
+            .unwrap();
+        assert!(success.contains("translated=1&amp;version=7"));
+        assert!(success.contains("hx-boost=\"false\""));
+
+        let error =
+            TranslateResultTemplate::error("session".to_string(), 0, true, 7, "<bad>".to_string())
+                .render()
+                .unwrap();
+        assert!(error.contains("translated=1&amp;version=7"));
+        assert!(error.contains("force"));
+        assert!(error.contains("bad"));
+        assert!(!error.contains("<bad>"));
     }
 }

@@ -5,6 +5,11 @@ use mupdf::{Document as MuDocument, MetadataName};
 
 use crate::error::{Error, Result};
 
+/// Maximum number of pages accepted from an untrusted PDF.
+///
+/// This bounds the work performed by page-oriented translation operations.
+pub const MAX_PAGE_COUNT: usize = 2_000;
+
 /// Thread-safe wrapper around a PDF document
 pub struct PdfDocument {
     /// The raw PDF bytes (kept for potential re-processing)
@@ -39,13 +44,40 @@ impl PdfDocument {
         let doc = MuDocument::from_bytes(&bytes, "")
             .map_err(|e| Error::PdfOpen(format!("Failed to parse PDF: {e}")))?;
 
-        let page_count = doc.page_count()
+        if doc
+            .needs_password()
+            .map_err(|e| Error::PdfOpen(format!("Failed to inspect PDF encryption: {e}")))?
+        {
+            return Err(Error::PdfOpen(
+                "Encrypted PDF documents are not supported".to_string(),
+            ));
+        }
+        let encryption = doc
+            .metadata(MetadataName::Encryption)
+            .map_err(|e| Error::PdfOpen(format!("Failed to inspect PDF encryption: {e}")))?;
+        if !encryption.is_empty() && encryption != "None" {
+            return Err(Error::PdfOpen(
+                "Encrypted PDF documents are not supported".to_string(),
+            ));
+        }
+
+        let page_count = doc
+            .page_count()
             .map_err(|e| Error::PdfOpen(format!("Failed to get page count: {e}")))?;
+        let page_count = usize::try_from(page_count)
+            .map_err(|_| Error::PdfOpen("PDF reported a negative page count".to_string()))?;
+        if page_count == 0 {
+            return Err(Error::PdfOpen("PDF contains no pages".to_string()));
+        }
+        if page_count > MAX_PAGE_COUNT {
+            return Err(Error::PdfOpen(format!(
+                "PDF has {page_count} pages, exceeding the limit of {MAX_PAGE_COUNT}"
+            )));
+        }
 
         // Extract metadata - mupdf returns empty string if not present
-        let get_meta = |name| -> Option<String> {
-            doc.metadata(name).ok().filter(|s| !s.is_empty())
-        };
+        let get_meta =
+            |name| -> Option<String> { doc.metadata(name).ok().filter(|s| !s.is_empty()) };
 
         let metadata = DocumentMetadata {
             title: get_meta(MetadataName::Title),
@@ -63,7 +95,7 @@ impl PdfDocument {
         Ok(Self {
             bytes: Arc::new(bytes),
             metadata,
-            page_count: usize::try_from(page_count).unwrap_or(0),
+            page_count,
             cache_id,
         })
     }
@@ -71,7 +103,11 @@ impl PdfDocument {
     /// Open a PDF from a file path
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
         let bytes = std::fs::read(path.as_ref()).map_err(|e| {
-            Error::PdfOpen(format!("Failed to read file {}: {}", path.as_ref().display(), e))
+            Error::PdfOpen(format!(
+                "Failed to read file {}: {}",
+                path.as_ref().display(),
+                e
+            ))
         })?;
         Self::from_bytes(bytes)
     }
@@ -135,6 +171,7 @@ impl std::fmt::Debug for PdfDocument {
             .field("page_count", &self.page_count)
             .field("metadata", &self.metadata)
             .field("bytes_len", &self.bytes.len())
+            .field("cache_id", &self.cache_id)
             .finish()
     }
 }

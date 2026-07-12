@@ -13,10 +13,12 @@
 //!     - **FontFile2**: The embedded TrueType font program
 //!   - **ToUnicode CMap**: Maps glyph IDs back to Unicode for copy/paste
 
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::fmt::Write;
 use std::sync::LazyLock;
 
 use lopdf::{Document, Object, ObjectId, Stream};
-use ttf_parser::Face;
+use skrifa::{charmap::MappingIndex, prelude::FontRef, raw::TableProvider};
 
 use crate::error::{Error, Result};
 
@@ -26,21 +28,63 @@ use crate::error::{Error, Result};
 const NOTO_SERIF: &[u8] = include_bytes!("../../assets/NotoSerif-Regular.ttf");
 
 /// Global font instance, parsed once on first use.
-static GLOBAL_FONT: LazyLock<EmbeddedFont> = LazyLock::new(|| {
-    EmbeddedFont::new().expect("Failed to parse embedded Noto Serif font")
-});
+#[allow(clippy::expect_used)]
+static GLOBAL_FONT: LazyLock<EmbeddedFont> =
+    LazyLock::new(|| EmbeddedFont::new().expect("Failed to parse embedded Noto Serif font"));
 
 /// Handles TrueType font embedding in PDFs.
 pub struct EmbeddedFont {
-    face: Face<'static>,
+    face: FontRef<'static>,
+    mapping_index: MappingIndex,
+    units_per_em: u16,
+    bounding_box: [i16; 4],
+    ascender: i16,
+    descender: i16,
+    capital_height: i16,
+}
+#[derive(Debug)]
+struct EncodedGlyph {
+    cid: u16,
+    gid: u16,
+    character: char,
+}
+
+/// Per-document mapping from emitted Unicode scalars to PDF CIDs and TrueType GIDs.
+pub(super) struct FontEncoding {
+    by_character: BTreeMap<char, u16>,
+    glyphs: Vec<EncodedGlyph>,
 }
 
 impl EmbeddedFont {
     /// Create a new embedded font handler.
     fn new() -> Result<Self> {
-        let face = Face::parse(NOTO_SERIF, 0)
-            .map_err(|e| Error::PdfOverlay(format!("Failed to parse font: {e}")))?;
-        Ok(Self { face })
+        let face = FontRef::new(NOTO_SERIF)
+            .map_err(|error| Error::PdfOverlay(format!("Failed to parse font: {error}")))?;
+        let mapping_index = MappingIndex::new(&face);
+        let head = face
+            .head()
+            .map_err(|error| Error::PdfOverlay(format!("Failed to read font metrics: {error}")))?;
+        let units_per_em = head.units_per_em();
+        let bounding_box = [head.x_min(), head.y_min(), head.x_max(), head.y_max()];
+        let hhea = face
+            .hhea()
+            .map_err(|error| Error::PdfOverlay(format!("Failed to read font metrics: {error}")))?;
+        let ascender = hhea.ascender().to_i16();
+        let descender = hhea.descender().to_i16();
+        let capital_height = face
+            .os2()
+            .ok()
+            .and_then(|os2| os2.s_cap_height())
+            .unwrap_or(ascender);
+        Ok(Self {
+            face,
+            mapping_index,
+            units_per_em,
+            bounding_box,
+            ascender,
+            descender,
+            capital_height,
+        })
     }
 
     /// Get the global shared font instance.
@@ -48,21 +92,51 @@ impl EmbeddedFont {
         &GLOBAL_FONT
     }
 
-    /// Get the glyph ID for a character, falling back to .notdef (0) if not found.
-    pub fn glyph_id(&self, c: char) -> u16 {
-        self.face.glyph_index(c).map_or(0, |g| g.0)
+    /// Get the glyph ID for a character.
+    ///
+    /// Unsupported scalars use the visible replacement-character glyph when
+    /// available, otherwise the font's `.notdef` glyph.
+    pub fn glyph_id(&self, character: char) -> u16 {
+        self.mapping_index
+            .charmap(&self.face)
+            .map(character)
+            .and_then(|glyph| u16::try_from(glyph.to_u32()).ok())
+            .unwrap_or_else(|| self.fallback_glyph_id())
+    }
+
+    fn fallback_glyph_id(&self) -> u16 {
+        self.mapping_index
+            .charmap(&self.face)
+            .map('\u{FFFD}')
+            .and_then(|glyph| u16::try_from(glyph.to_u32()).ok())
+            .unwrap_or(0)
     }
 
     /// Get the advance width of a glyph in font units.
     pub fn glyph_width(&self, glyph_id: u16) -> u16 {
+        let Ok(maxp) = self.face.maxp() else {
+            return 0;
+        };
+        if u32::from(glyph_id) >= u32::from(maxp.num_glyphs()) {
+            return 0;
+        }
+
         self.face
-            .glyph_hor_advance(ttf_parser::GlyphId(glyph_id))
+            .hmtx()
+            .ok()
+            .and_then(|hmtx| {
+                let metrics = hmtx.h_metrics();
+                metrics
+                    .get(usize::from(glyph_id))
+                    .or_else(|| metrics.last())
+                    .map(|metric| metric.advance.get())
+            })
             .unwrap_or(0)
     }
 
     /// Get the font's units per em.
-    pub fn units_per_em(&self) -> u16 {
-        self.face.units_per_em()
+    pub const fn units_per_em(&self) -> u16 {
+        self.units_per_em
     }
 
     /// Calculate the width of a string in PDF points at the given font size.
@@ -76,31 +150,73 @@ impl EmbeddedFont {
         total_units as f32 * font_size / units_per_em
     }
 
-    /// Convert text to a hex string of glyph IDs for PDF content streams.
-    /// Returns the hex string without angle brackets.
-    pub fn text_to_hex_glyphs(&self, text: &str) -> String {
-        use std::fmt::Write;
-        text.chars().fold(String::new(), |mut acc, c| {
-            let _ = write!(acc, "{:04X}", self.glyph_id(c));
-            acc
+    /// Build a stable CID assignment for the characters emitted by a content stream.
+    pub(super) fn encoding_for_characters<I>(&self, characters: I) -> Result<FontEncoding>
+    where
+        I: IntoIterator<Item = char>,
+    {
+        let characters: BTreeSet<char> = characters.into_iter().collect();
+        if characters.len() > usize::from(u16::MAX) {
+            return Err(Error::PdfOverlay(format!(
+                "Overlay uses {} distinct characters; PDF CID fonts support at most {}",
+                characters.len(),
+                u16::MAX
+            )));
+        }
+
+        let mut by_character = BTreeMap::new();
+        let mut glyphs = Vec::with_capacity(characters.len());
+        for (index, character) in characters.into_iter().enumerate() {
+            // Each Unicode scalar retains its own CID and ToUnicode entry even
+            // when multiple unsupported scalars share the fallback GID.
+            let gid = self.glyph_id(character);
+            let cid = u16::try_from(index + 1).map_err(|_| {
+                Error::PdfOverlay("Too many distinct characters for CID encoding".to_string())
+            })?;
+            by_character.insert(character, cid);
+            glyphs.push(EncodedGlyph {
+                cid,
+                gid,
+                character,
+            });
+        }
+
+        Ok(FontEncoding {
+            by_character,
+            glyphs,
         })
     }
 
+    /// Convert text to a hex string of assigned CIDs for a PDF content stream.
+    pub(super) fn text_to_hex_cids(text: &str, encoding: &FontEncoding) -> Result<String> {
+        text.chars()
+            .try_fold(String::new(), |mut output, character| {
+                let cid = encoding.by_character.get(&character).ok_or_else(|| {
+                    Error::PdfOverlay(format!(
+                        "No CID assigned for emitted character U+{:04X}",
+                        u32::from(character)
+                    ))
+                })?;
+                write!(output, "{cid:04X}")
+                    .map_err(|error| Error::PdfOverlay(format!("Failed to encode CID: {error}")))?;
+                Ok(output)
+            })
+    }
+
     /// Embed this font into a PDF document and add it to a page's resources.
-    /// Returns the font name to use in content streams (e.g., "/FTrans").
-    pub fn embed_in_document(
+    pub(super) fn embed_in_document(
         &self,
         doc: &mut Document,
         page_id: ObjectId,
+        encoding: &FontEncoding,
     ) -> Result<&'static str> {
-        // Create all the font objects
         let font_file_id = self.create_font_file(doc);
         let font_descriptor_id = self.create_font_descriptor(doc, font_file_id);
-        let cid_font_id = self.create_cid_font(doc, font_descriptor_id);
-        let to_unicode_id = self.create_to_unicode_cmap(doc);
+        let cid_to_gid_id = Self::create_cid_to_gid_map(doc, encoding);
+        let cid_font_id = self.create_cid_font(doc, font_descriptor_id, cid_to_gid_id, encoding);
+        let to_unicode_id = Self::create_to_unicode_cmap(doc, encoding);
         let type0_font_id = self.create_type0_font(doc, cid_font_id, to_unicode_id);
 
-        // Add the font to the page's resources
         self.add_font_to_page(doc, page_id, type0_font_id)?;
 
         Ok("FTrans")
@@ -119,23 +235,28 @@ impl EmbeddedFont {
 
     /// Create the FontDescriptor dictionary with font metrics.
     fn create_font_descriptor(&self, doc: &mut Document, font_file_id: ObjectId) -> ObjectId {
-        let bbox = self.face.global_bounding_box();
-
+        let [x_min, y_min, x_max, y_max] = self.bounding_box;
         let dict = lopdf::Dictionary::from_iter([
             ("Type", Object::Name(b"FontDescriptor".to_vec())),
             ("FontName", Object::Name(b"NotoSerif".to_vec())),
-            ("FontFamily", Object::String(b"Noto Serif".to_vec(), lopdf::StringFormat::Literal)),
+            (
+                "FontFamily",
+                Object::String(b"Noto Serif".to_vec(), lopdf::StringFormat::Literal),
+            ),
             ("Flags", Object::Integer(32)), // Nonsymbolic
-            ("FontBBox", Object::Array(vec![
-                Object::Integer(i64::from(bbox.x_min)),
-                Object::Integer(i64::from(bbox.y_min)),
-                Object::Integer(i64::from(bbox.x_max)),
-                Object::Integer(i64::from(bbox.y_max)),
-            ])),
+            (
+                "FontBBox",
+                Object::Array(vec![
+                    Object::Integer(i64::from(x_min)),
+                    Object::Integer(i64::from(y_min)),
+                    Object::Integer(i64::from(x_max)),
+                    Object::Integer(i64::from(y_max)),
+                ]),
+            ),
             ("ItalicAngle", Object::Integer(0)),
-            ("Ascent", Object::Integer(i64::from(self.face.ascender()))),
-            ("Descent", Object::Integer(i64::from(self.face.descender()))),
-            ("CapHeight", Object::Integer(i64::from(self.face.capital_height().unwrap_or_else(|| self.face.ascender())))),
+            ("Ascent", Object::Integer(i64::from(self.ascender))),
+            ("Descent", Object::Integer(i64::from(self.descender))),
+            ("CapHeight", Object::Integer(i64::from(self.capital_height))),
             ("StemV", Object::Integer(90)), // Approximate value for serif
             ("FontFile2", Object::Reference(font_file_id)),
         ]);
@@ -143,28 +264,39 @@ impl EmbeddedFont {
         doc.add_object(Object::Dictionary(dict))
     }
 
-    /// Create the CIDFont dictionary with per-glyph width information.
-    fn create_cid_font(&self, doc: &mut Document, font_descriptor_id: ObjectId) -> ObjectId {
-        // Build the W (widths) array for proper character spacing
-        // Format: [gid [w1 w2 ...]] for consecutive glyphs starting at gid
-        let widths_array = self.build_widths_array();
-
-        // Default width for any glyph not in the W array (use space width, scaled)
+    /// Create the CIDFont dictionary with per-CID width information.
+    fn create_cid_font(
+        &self,
+        doc: &mut Document,
+        font_descriptor_id: ObjectId,
+        cid_to_gid_id: ObjectId,
+        encoding: &FontEncoding,
+    ) -> ObjectId {
+        let widths_array = self.build_widths_array(encoding);
         let default_width = self.scale_width(self.glyph_width(self.glyph_id(' ')));
 
         let dict = lopdf::Dictionary::from_iter([
             ("Type", Object::Name(b"Font".to_vec())),
             ("Subtype", Object::Name(b"CIDFontType2".to_vec())),
             ("BaseFont", Object::Name(b"NotoSerif".to_vec())),
-            ("CIDSystemInfo", Object::Dictionary(lopdf::Dictionary::from_iter([
-                ("Registry", Object::String(b"Adobe".to_vec(), lopdf::StringFormat::Literal)),
-                ("Ordering", Object::String(b"Identity".to_vec(), lopdf::StringFormat::Literal)),
-                ("Supplement", Object::Integer(0)),
-            ]))),
+            (
+                "CIDSystemInfo",
+                Object::Dictionary(lopdf::Dictionary::from_iter([
+                    (
+                        "Registry",
+                        Object::String(b"Adobe".to_vec(), lopdf::StringFormat::Literal),
+                    ),
+                    (
+                        "Ordering",
+                        Object::String(b"Identity".to_vec(), lopdf::StringFormat::Literal),
+                    ),
+                    ("Supplement", Object::Integer(0)),
+                ])),
+            ),
             ("FontDescriptor", Object::Reference(font_descriptor_id)),
             ("DW", Object::Integer(default_width)),
             ("W", Object::Array(widths_array)),
-            ("CIDToGIDMap", Object::Name(b"Identity".to_vec())),
+            ("CIDToGIDMap", Object::Reference(cid_to_gid_id)),
         ]);
 
         doc.add_object(Object::Dictionary(dict))
@@ -174,94 +306,77 @@ impl EmbeddedFont {
     fn scale_width(&self, width: u16) -> i64 {
         // PDF expects widths in 1/1000ths of text space
         // TrueType widths are in font design units (e.g., 2048 per em)
-        let units_per_em = i64::from(self.face.units_per_em());
-        (i64::from(width) * 1000) / units_per_em
+        (i64::from(width) * 1000) / i64::from(self.units_per_em)
     }
 
-    /// Build the W (widths) array for CIDFont.
-    /// The W array format is: [gid [w1 w2 ...]] for consecutive GIDs starting at gid.
-    fn build_widths_array(&self) -> Vec<Object> {
-        use std::collections::BTreeMap;
-
-        // Collect (GID -> scaled_width) for all characters we care about
-        let mut gid_widths: BTreeMap<u16, i64> = BTreeMap::new();
-
-        // Define character ranges to include widths for
-        let ranges: &[(u32, u32)] = &[
-            (0x0020, 0x007F), // Basic Latin (ASCII printable)
-            (0x00A0, 0x00FF), // Latin-1 Supplement
-            (0x0100, 0x017F), // Latin Extended-A
-            (0x0180, 0x024F), // Latin Extended-B
-            (0x2000, 0x206F), // General Punctuation (smart quotes, dashes, etc.)
-            (0x20AC, 0x20AC), // Euro sign
-        ];
-
-        for &(start, end) in ranges {
-            for codepoint in start..=end {
-                if let Some(c) = char::from_u32(codepoint) {
-                    let gid = self.glyph_id(c);
-                    if gid != 0 {
-                        let width = self.glyph_width(gid);
-                        let scaled = self.scale_width(width);
-                        gid_widths.insert(gid, scaled);
-                    }
-                }
-            }
+    /// Build the W array for every emitted CID using its TrueType glyph width.
+    fn build_widths_array(&self, encoding: &FontEncoding) -> Vec<Object> {
+        if encoding.glyphs.is_empty() {
+            return Vec::new();
         }
 
-        // Build W array from sorted GIDs, grouping consecutive runs
-        let mut result = Vec::new();
-        let mut iter = gid_widths.iter().peekable();
+        let widths = encoding
+            .glyphs
+            .iter()
+            .map(|glyph| Object::Integer(self.scale_width(self.glyph_width(glyph.gid))))
+            .collect();
+        vec![Object::Integer(1), Object::Array(widths)]
+    }
 
-        while let Some((&first_gid, &first_width)) = iter.next() {
-            let mut widths = vec![Object::Integer(first_width)];
-            let mut expected_next = first_gid + 1;
-
-            // Collect consecutive GIDs
-            while let Some(&(&gid, &width)) = iter.peek() {
-                if gid == expected_next {
-                    widths.push(Object::Integer(width));
-                    expected_next += 1;
-                    iter.next();
-                } else {
-                    break;
-                }
-            }
-
-            result.push(Object::Integer(i64::from(first_gid)));
-            result.push(Object::Array(widths));
+    /// Build the binary CIDToGIDMap stream. Entry N is the big-endian GID for CID N.
+    fn create_cid_to_gid_map(doc: &mut Document, encoding: &FontEncoding) -> ObjectId {
+        let mut map = Vec::with_capacity((encoding.glyphs.len() + 1) * 2);
+        map.extend_from_slice(&0_u16.to_be_bytes());
+        for glyph in &encoding.glyphs {
+            map.extend_from_slice(&glyph.gid.to_be_bytes());
         }
-
-        result
+        let stream = Stream::new(lopdf::Dictionary::new(), map).with_compression(true);
+        doc.add_object(Object::Stream(stream))
     }
 
     /// Create a ToUnicode CMap for text extraction/copy-paste support.
-    #[allow(clippy::unused_self)] // Kept as method for API consistency
-    fn create_to_unicode_cmap(&self, doc: &mut Document) -> ObjectId {
-        // This is a simplified Identity CMap that maps glyph IDs directly to Unicode
-        // For a complete implementation, you'd generate mappings for all used glyphs
-        let cmap = b"/CIDInit /ProcSet findresource begin
-12 dict begin
-begincmap
-/CIDSystemInfo <<
-  /Registry (Adobe)
-  /Ordering (UCS)
-  /Supplement 0
->> def
-/CMapName /Adobe-Identity-UCS def
-/CMapType 2 def
-1 begincodespacerange
-<0000> <FFFF>
-endcodespacerange
-1 beginbfrange
-<0000> <FFFF> <0000>
-endbfrange
-endcmap
-CMapName currentdict /CMap defineresource pop
-end
-end";
+    fn create_to_unicode_cmap(doc: &mut Document, encoding: &FontEncoding) -> ObjectId {
+        let mut cmap = String::from(
+            "/CIDInit /ProcSet findresource begin\n\
+             12 dict begin\n\
+             begincmap\n\
+             /CIDSystemInfo <<\n\
+             /Registry (Adobe)\n\
+             /Ordering (UCS)\n\
+             /Supplement 0\n\
+             >> def\n\
+             /CMapName /Adobe-Identity-UCS def\n\
+             /CMapType 2 def\n\
+             1 begincodespacerange\n\
+             <0000> <FFFF>\n\
+             endcodespacerange\n",
+        );
 
-        let stream = Stream::new(lopdf::Dictionary::new(), cmap.to_vec());
+        let mut mappings = encoding.glyphs.iter();
+        while mappings.len() != 0 {
+            let count = mappings.len().min(100);
+            let _ = writeln!(cmap, "{count} beginbfchar");
+            for glyph in mappings.by_ref().take(count) {
+                let mut utf16 = [0_u16; 2];
+                let encoded = glyph.character.encode_utf16(&mut utf16);
+                let cid = glyph.cid;
+                let _ = write!(cmap, "<{cid:04X}> <");
+                for unit in encoded {
+                    let _ = write!(cmap, "{unit:04X}");
+                }
+                cmap.push_str(">\n");
+            }
+            cmap.push_str("endbfchar\n");
+        }
+
+        cmap.push_str(
+            "endcmap\n\
+             CMapName currentdict /CMap defineresource pop\n\
+             end\n\
+             end",
+        );
+
+        let stream = Stream::new(lopdf::Dictionary::new(), cmap.into_bytes());
         doc.add_object(Object::Stream(stream))
     }
 
@@ -278,7 +393,10 @@ end";
             ("Subtype", Object::Name(b"Type0".to_vec())),
             ("BaseFont", Object::Name(b"NotoSerif".to_vec())),
             ("Encoding", Object::Name(b"Identity-H".to_vec())),
-            ("DescendantFonts", Object::Array(vec![Object::Reference(cid_font_id)])),
+            (
+                "DescendantFonts",
+                Object::Array(vec![Object::Reference(cid_font_id)]),
+            ),
             ("ToUnicode", Object::Reference(to_unicode_id)),
         ]);
 
@@ -297,23 +415,30 @@ end";
         font_id: ObjectId,
     ) -> Result<()> {
         // First, resolve the Resources dictionary (may be inline or a reference)
-        let mut resources = self.resolve_resources(doc, page_id)?;
+        let mut resources = Self::resolve_resources(doc, page_id)?;
 
         // Resolve the Font dictionary within Resources (also may be a reference)
-        let mut fonts = if let Ok(font_obj) = resources.get(b"Font") {
-            match font_obj {
-                Object::Dictionary(d) => d.clone(),
-                Object::Reference(ref_id) => {
-                    if let Ok(Object::Dictionary(d)) = doc.get_object(*ref_id) {
-                        d.clone()
-                    } else {
-                        lopdf::Dictionary::new()
-                    }
+        let mut fonts = match resources.get(b"Font").ok() {
+            Some(Object::Dictionary(dictionary)) => dictionary.clone(),
+            Some(Object::Reference(object_id)) => match doc.get_object(*object_id) {
+                Ok(Object::Dictionary(dictionary)) => dictionary.clone(),
+                Ok(_) => {
+                    return Err(Error::Lopdf(
+                        "Resources Font object is not a dictionary".to_string(),
+                    ));
                 }
-                _ => lopdf::Dictionary::new(),
+                Err(error) => {
+                    return Err(Error::Lopdf(format!(
+                        "Failed to resolve Font dictionary {object_id:?}: {error}"
+                    )));
+                }
+            },
+            Some(_) => {
+                return Err(Error::Lopdf(
+                    "Resources Font entry is not a dictionary".to_string(),
+                ));
             }
-        } else {
-            lopdf::Dictionary::new()
+            None => lopdf::Dictionary::new(),
         };
 
         // Add our font as FTrans
@@ -321,12 +446,14 @@ end";
         resources.set("Font", Object::Dictionary(fonts));
 
         // Set the updated Resources back on the page (as inline dict to capture our changes)
-        let page = doc.get_object_mut(page_id)
+        let page = doc
+            .get_object_mut(page_id)
             .map_err(|e| Error::Lopdf(format!("Failed to get page: {e}")))?;
 
-        if let Object::Dictionary(page_dict) = page {
-            page_dict.set("Resources", Object::Dictionary(resources));
-        }
+        let Object::Dictionary(page_dict) = page else {
+            return Err(Error::Lopdf("Page object is not a dictionary".to_string()));
+        };
+        page_dict.set("Resources", Object::Dictionary(resources));
 
         Ok(())
     }
@@ -338,91 +465,89 @@ end";
     /// - An inline dictionary: `/Resources << /Font << ... >> >>`
     /// - An indirect reference: `/Resources 5 0 R`
     /// - Inherited from parent Pages node (common in complex PDFs like archive.org)
-    fn resolve_resources(&self, doc: &Document, page_id: ObjectId) -> Result<lopdf::Dictionary> {
-        let page = doc.get_object(page_id)
+    fn resolve_resources(doc: &Document, page_id: ObjectId) -> Result<lopdf::Dictionary> {
+        let page = doc
+            .get_object(page_id)
             .map_err(|e| Error::Lopdf(format!("Failed to get page: {e}")))?;
+        let Object::Dictionary(page_dict) = page else {
+            return Err(Error::Lopdf("Page object is not a dictionary".to_string()));
+        };
 
-        if let Object::Dictionary(page_dict) = page {
-            // First, try to get Resources directly from the page
-            if let Ok(res_obj) = page_dict.get(b"Resources") {
-                if let Some(dict) = self.resolve_dict_object(doc, res_obj) {
-                    return Ok(dict);
-                }
-            }
-
-            // If not found, try to inherit from parent Pages node
-            if let Ok(parent_obj) = page_dict.get(b"Parent") {
-                if let Some(dict) = self.resolve_inherited_resources(doc, parent_obj) {
-                    return Ok(dict);
-                }
-            }
+        if let Ok(resources) = page_dict.get(b"Resources") {
+            return Self::resolve_dict_object(doc, resources)?
+                .ok_or_else(|| Error::Lopdf("Page Resources is not a dictionary".to_string()));
         }
 
-        // No Resources found - create empty dictionary
-        Ok(lopdf::Dictionary::new())
+        let Some(Object::Reference(parent_id)) = page_dict.get(b"Parent").ok() else {
+            return Ok(lopdf::Dictionary::new());
+        };
+
+        Self::resolve_inherited_resources(doc, *parent_id)?
+            .map_or_else(|| Ok(lopdf::Dictionary::new()), Ok)
     }
 
     /// Resolve an object that should be a Dictionary (handles References).
-    fn resolve_dict_object(&self, doc: &Document, obj: &Object) -> Option<lopdf::Dictionary> {
-        match obj {
-            Object::Dictionary(d) => Some(d.clone()),
-            Object::Reference(ref_id) => {
-                if let Ok(Object::Dictionary(d)) = doc.get_object(*ref_id) {
-                    Some(d.clone())
-                } else {
-                    None
-                }
-            }
-            _ => None,
+    fn resolve_dict_object(doc: &Document, object: &Object) -> Result<Option<lopdf::Dictionary>> {
+        match object {
+            Object::Dictionary(dictionary) => Ok(Some(dictionary.clone())),
+            Object::Reference(object_id) => match doc.get_object(*object_id) {
+                Ok(Object::Dictionary(dictionary)) => Ok(Some(dictionary.clone())),
+                Ok(_) => Ok(None),
+                Err(error) => Err(Error::Lopdf(format!(
+                    "Failed to resolve dictionary {object_id:?}: {error}"
+                ))),
+            },
+            _ => Ok(None),
         }
     }
 
     /// Walk up the Pages tree to find inherited Resources.
-    ///
-    /// Uses a depth limit to prevent infinite recursion on malformed PDFs
-    /// with circular Parent references.
-    fn resolve_inherited_resources(&self, doc: &Document, parent_obj: &Object) -> Option<lopdf::Dictionary> {
-        self.resolve_inherited_resources_recursive(doc, parent_obj, 10)
-    }
-
-    fn resolve_inherited_resources_recursive(
-        &self,
+    fn resolve_inherited_resources(
         doc: &Document,
-        parent_obj: &Object,
-        depth: usize,
-    ) -> Option<lopdf::Dictionary> {
-        if depth == 0 {
-            return None;
-        }
+        mut parent_id: ObjectId,
+    ) -> Result<Option<lopdf::Dictionary>> {
+        let mut visited = HashSet::new();
 
-        let parent_id = match parent_obj {
-            Object::Reference(id) => *id,
-            _ => return None,
-        };
+        loop {
+            if !visited.insert(parent_id) {
+                return Err(Error::Lopdf(format!(
+                    "Cycle in page Parent chain at {parent_id:?}"
+                )));
+            }
 
-        let parent = match doc.get_object(parent_id) {
-            Ok(Object::Dictionary(d)) => d,
-            _ => return None,
-        };
+            let parent_object = doc.get_object(parent_id).map_err(|error| {
+                Error::Lopdf(format!("Failed to get Pages node {parent_id:?}: {error}"))
+            })?;
+            let Object::Dictionary(parent) = parent_object else {
+                return Err(Error::Lopdf("Pages node is not a dictionary".to_string()));
+            };
 
-        // Check if this parent node has Resources
-        if let Ok(res_obj) = parent.get(b"Resources") {
-            if let Some(dict) = self.resolve_dict_object(doc, res_obj) {
-                return Some(dict);
+            if let Ok(resources) = parent.get(b"Resources") {
+                return Self::resolve_dict_object(doc, resources)?.map_or_else(
+                    || {
+                        Err(Error::Lopdf(
+                            "Inherited Resources is not a dictionary".to_string(),
+                        ))
+                    },
+                    |dictionary| Ok(Some(dictionary)),
+                );
+            }
+
+            match parent.get(b"Parent").ok() {
+                Some(Object::Reference(grandparent_id)) => parent_id = *grandparent_id,
+                Some(_) => {
+                    return Err(Error::Lopdf(
+                        "Pages Parent is not an indirect reference".to_string(),
+                    ));
+                }
+                None => return Ok(None),
             }
         }
-
-        // Continue up the tree
-        if let Ok(grandparent_obj) = parent.get(b"Parent") {
-            return self.resolve_inherited_resources_recursive(doc, grandparent_obj, depth - 1);
-        }
-
-        None
     }
 }
 
-
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -442,7 +567,8 @@ mod tests {
     #[test]
     fn test_hex_conversion() {
         let font = EmbeddedFont::global();
-        let hex = font.text_to_hex_glyphs("A");
+        let encoding = font.encoding_for_characters("A".chars()).unwrap();
+        let hex = EmbeddedFont::text_to_hex_cids("A", &encoding).unwrap();
         // Should be 4 hex digits for one character
         assert_eq!(hex.len(), 4);
     }

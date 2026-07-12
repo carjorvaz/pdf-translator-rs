@@ -111,6 +111,43 @@ impl Default for TextColor {
     }
 }
 
+/// Non-secret identity of a translator backend for cache partitioning.
+///
+/// Authentication material is deliberately excluded. Backends must include
+/// every non-secret setting that can change translation output.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TranslatorCacheIdentity {
+    backend: String,
+    endpoint: String,
+    model: String,
+}
+
+impl TranslatorCacheIdentity {
+    pub fn new(
+        backend: impl Into<String>,
+        endpoint: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        Self {
+            backend: backend.into(),
+            endpoint: endpoint.into(),
+            model: model.into(),
+        }
+    }
+
+    pub fn backend(&self) -> &str {
+        &self.backend
+    }
+
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+}
+
 /// Translator backend configuration for OpenAI-compatible APIs.
 ///
 /// Supports llama.cpp, Ollama, DeepSeek, OpenAI, and any other OpenAI-compatible API.
@@ -270,9 +307,8 @@ impl AppConfig {
             ))
         })?;
 
-        toml::from_str(&content).map_err(|e| {
-            crate::error::Error::ConfigLoad(format!("Failed to parse config: {e}"))
-        })
+        toml::from_str(&content)
+            .map_err(|e| crate::error::Error::ConfigLoad(format!("Failed to parse config: {e}")))
     }
 
     /// Load from default locations (~/.config/pdf-translator/config.toml, ./config.toml)
@@ -328,15 +364,51 @@ pub struct LanguageOption {
 /// Includes all languages since input encoding is handled by the translation API.
 pub fn source_languages() -> Vec<LanguageOption> {
     vec![
-        LanguageOption { code: "fr", name: "French", flag: "🇫🇷" },
-        LanguageOption { code: "en", name: "English", flag: "🇬🇧" },
-        LanguageOption { code: "de", name: "German", flag: "🇩🇪" },
-        LanguageOption { code: "es", name: "Spanish", flag: "🇪🇸" },
-        LanguageOption { code: "it", name: "Italian", flag: "🇮🇹" },
-        LanguageOption { code: "pt", name: "Portuguese", flag: "🇵🇹" },
-        LanguageOption { code: "zh-CN", name: "Chinese", flag: "🇨🇳" },
-        LanguageOption { code: "ja", name: "Japanese", flag: "🇯🇵" },
-        LanguageOption { code: "auto", name: "Auto", flag: "🔍" },
+        LanguageOption {
+            code: "fr",
+            name: "French",
+            flag: "🇫🇷",
+        },
+        LanguageOption {
+            code: "en",
+            name: "English",
+            flag: "🇬🇧",
+        },
+        LanguageOption {
+            code: "de",
+            name: "German",
+            flag: "🇩🇪",
+        },
+        LanguageOption {
+            code: "es",
+            name: "Spanish",
+            flag: "🇪🇸",
+        },
+        LanguageOption {
+            code: "it",
+            name: "Italian",
+            flag: "🇮🇹",
+        },
+        LanguageOption {
+            code: "pt",
+            name: "Portuguese",
+            flag: "🇵🇹",
+        },
+        LanguageOption {
+            code: "zh-CN",
+            name: "Chinese",
+            flag: "🇨🇳",
+        },
+        LanguageOption {
+            code: "ja",
+            name: "Japanese",
+            flag: "🇯🇵",
+        },
+        LanguageOption {
+            code: "auto",
+            name: "Auto",
+            flag: "🔍",
+        },
     ]
 }
 
@@ -345,12 +417,36 @@ pub fn source_languages() -> Vec<LanguageOption> {
 /// (WinAnsiEncoding only supports ~256 Latin characters).
 pub fn target_languages() -> Vec<LanguageOption> {
     vec![
-        LanguageOption { code: "en", name: "English", flag: "🇬🇧" },
-        LanguageOption { code: "fr", name: "French", flag: "🇫🇷" },
-        LanguageOption { code: "de", name: "German", flag: "🇩🇪" },
-        LanguageOption { code: "es", name: "Spanish", flag: "🇪🇸" },
-        LanguageOption { code: "it", name: "Italian", flag: "🇮🇹" },
-        LanguageOption { code: "pt", name: "Portuguese", flag: "🇵🇹" },
+        LanguageOption {
+            code: "en",
+            name: "English",
+            flag: "🇬🇧",
+        },
+        LanguageOption {
+            code: "fr",
+            name: "French",
+            flag: "🇫🇷",
+        },
+        LanguageOption {
+            code: "de",
+            name: "German",
+            flag: "🇩🇪",
+        },
+        LanguageOption {
+            code: "es",
+            name: "Spanish",
+            flag: "🇪🇸",
+        },
+        LanguageOption {
+            code: "it",
+            name: "Italian",
+            flag: "🇮🇹",
+        },
+        LanguageOption {
+            code: "pt",
+            name: "Portuguese",
+            flag: "🇵🇹",
+        },
     ]
 }
 

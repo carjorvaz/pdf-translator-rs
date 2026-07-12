@@ -1,12 +1,12 @@
 mod document;
 mod font;
-mod page_index;
-mod text;
-mod render;
 pub mod overlay;
+mod page_index;
+mod render;
+mod text;
 
-pub use document::PdfDocument;
+pub use document::{MAX_PAGE_COUNT, PdfDocument};
+pub use overlay::{OverlayOptions, PdfOverlay, TranslationOverlay, combine_pdfs};
 pub use page_index::PageIndex;
+pub use render::{PageRenderer, PageSize, render_page_from_bytes};
 pub use text::{BoundingBox, TextBlock, TextExtractor};
-pub use render::{PageRenderer, render_page_from_bytes};
-pub use overlay::{PdfOverlay, OverlayOptions, TranslationOverlay, combine_pdfs};

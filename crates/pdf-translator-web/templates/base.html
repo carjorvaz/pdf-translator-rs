@@ -17,7 +17,7 @@
     <main id="main-content">
         {% block content %}{% endblock %}
     </main>
-    <div id="toast" class="{% block toast_class %}{% endblock %}" role="status" aria-live="polite">{% block toast %}{% endblock %}</div>
+    <div id="toast" class="{% block toast_class %}{% endblock %}" role="status" aria-live="polite" aria-atomic="true">{% block toast %}{% endblock %}</div>
     {% block scripts %}{% endblock %}
 </body>
 </html>

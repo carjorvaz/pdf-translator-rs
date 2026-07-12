@@ -43,6 +43,7 @@ This extension adds support for Server Sent Events to htmx.  See /www/extensions
       switch (name) {
         case 'htmx:beforeCleanupElement':
           var internalData = api.getInternalData(parent)
+          clearReconnectTimers(parent)
           // Try to remove remove an EventSource when elements are removed
           var source = internalData.sseEventSource
           if (source) {
@@ -210,9 +211,23 @@ This extension adds support for Server Sent Events to htmx.  See /www/extensions
         retryCount = retryCount || 0
         retryCount = Math.max(Math.min(retryCount * 2, 128), 1)
         var timeout = retryCount * 500
-        window.setTimeout(function() {
+        var internalData = api.getInternalData(elt)
+        var reconnectTimers = internalData.sseReconnectTimers
+        if (reconnectTimers == null) {
+          reconnectTimers = []
+          internalData.sseReconnectTimers = reconnectTimers
+        }
+        var reconnectTimer = window.setTimeout(function() {
+          var timerIndex = reconnectTimers.indexOf(reconnectTimer)
+          if (timerIndex !== -1) {
+            reconnectTimers.splice(timerIndex, 1)
+          }
+          if (!api.bodyContains(elt)) {
+            return
+          }
           ensureEventSourceOnElement(elt, retryCount)
         }, timeout)
+        reconnectTimers.push(reconnectTimer)
       }
     }
 
@@ -246,6 +261,21 @@ This extension adds support for Server Sent Events to htmx.  See /www/extensions
   }
 
   /**
+   * Cancels all pending reconnect attempts associated with an SSE element.
+   * @param {HTMLElement} elt
+   */
+  function clearReconnectTimers(elt) {
+    var reconnectTimers = api.getInternalData(elt).sseReconnectTimers
+    if (reconnectTimers == null) {
+      return
+    }
+    for (var i = 0; i < reconnectTimers.length; i++) {
+      window.clearTimeout(reconnectTimers[i])
+    }
+    reconnectTimers.length = 0
+  }
+
+  /**
    * maybeCloseSSESource confirms that the parent element still exists.
    * If not, then any associated SSE source is closed and the function returns true.
    *
@@ -254,6 +284,7 @@ This extension adds support for Server Sent Events to htmx.  See /www/extensions
    */
   function maybeCloseSSESource(elt) {
     if (!api.bodyContains(elt)) {
+      clearReconnectTimers(elt)
       var source = api.getInternalData(elt).sseEventSource
       if (source != undefined) {
         api.triggerEvent(elt, 'htmx:sseClose', {

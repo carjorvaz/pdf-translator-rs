@@ -2,7 +2,7 @@
 {# Language options are provided by the server - single source of truth in Rust code #}
 <div class="toolbar">
     {# Settings form - submits on any select change #}
-    {# Fieldset disabled during batch translation via OOB swap #}
+    {# ProgressTemplate toggles this fieldset's native disabled state during batch translation. #}
     <form id="settings-form" class="toolbar-settings"
           hx-post="/api/settings/{{ session_id }}"
           hx-trigger="change from:select"
@@ -12,13 +12,13 @@
             <div class="toolbar-group">
                 <select name="source_lang" required aria-label="Source language">
                     {% for lang in source_languages %}
-                    <option value="{{ lang.code }}"{% if lang.code == default_source %} selected{% endif %}>{{ lang.flag }} {{ lang.name }}</option>
+                    <option value="{{ lang.code }}"{% if lang.code == current_source %} selected{% endif %}>{{ lang.flag }} {{ lang.name }}</option>
                     {% endfor %}
                 </select>
                 <span class="lang-arrow">&rarr;</span>
                 <select name="target_lang" required aria-label="Target language">
                     {% for lang in target_languages %}
-                    <option value="{{ lang.code }}"{% if lang.code == default_target %} selected{% endif %}>{{ lang.flag }} {{ lang.name }}</option>
+                    <option value="{{ lang.code }}"{% if lang.code == current_target %} selected{% endif %}>{{ lang.flag }} {{ lang.name }}</option>
                     {% endfor %}
                 </select>
             </div>
@@ -26,9 +26,9 @@
             <div class="toolbar-group">
                 <span class="toolbar-label">Text:</span>
                 <select name="text_color" required aria-label="Translation text color">
-                    <option value="blue"{% if default_color == "blue" %} selected{% endif %}>🔵 Blue</option>
-                    <option value="darkred"{% if default_color == "darkred" %} selected{% endif %}>🔴 Red</option>
-                    <option value="black"{% if default_color == "black" %} selected{% endif %}>⚫ Black</option>
+                    <option value="blue"{% if current_color == "blue" %} selected{% endif %}>🔵 Blue</option>
+                    <option value="darkred"{% if current_color == "darkred" %} selected{% endif %}>🔴 Red</option>
+                    <option value="black"{% if current_color == "black" %} selected{% endif %}>⚫ Black</option>
                 </select>
             </div>
         </fieldset>
@@ -38,14 +38,20 @@
 
     <div id="view-toggle" class="view-toggle">
         <button type="button"
-                hx-post="/api/view-mode/{{ session_id }}/both"
+                hx-post="/api/view-mode/{{ session_id }}/{{ page + 1 }}/both"
                 hx-target="#viewer"
                 hx-swap="outerHTML"
+                hx-sync="#app:replace"
+                hx-push-url="/view/{{ session_id }}/{{ page + 1 }}?mode=both"
+                aria-pressed="{% if !view_translated_only %}true{% else %}false{% endif %}"
                 class="{% if !view_translated_only %}active{% endif %}">Both</button>
         <button type="button"
-                hx-post="/api/view-mode/{{ session_id }}/translated"
+                hx-post="/api/view-mode/{{ session_id }}/{{ page + 1 }}/translated"
                 hx-target="#viewer"
                 hx-swap="outerHTML"
+                hx-sync="#app:replace"
+                hx-push-url="/view/{{ session_id }}/{{ page + 1 }}?mode=translated"
+                aria-pressed="{% if view_translated_only %}true{% else %}false{% endif %}"
                 class="{% if view_translated_only %}active{% endif %}">Translated</button>
     </div>
 
@@ -65,7 +71,7 @@
             hx-swap="innerHTML"
             hx-indicator="#panel-loading"
             hx-disabled-elt="#translate-btn, #translate-all-btn"
-            hx-sync="this:abort"
+            hx-sync="#app:abort"
             {% if is_translated %}hx-vals='{"force": "1"}'{% endif %}
             _="on htmx:beforeRequest add .loading to me on htmx:afterRequest remove .loading from me"
             class="btn btn-action {% if is_translated %}btn-secondary{% else %}btn-primary{% endif %}">
@@ -84,5 +90,9 @@
         <span class="btn-text">Translate All</span>
         <span class="btn-text-loading">Starting<span class="spinner"></span></span>
     </button>
-    <a id="download-btn" href="/api/download/{{ session_id }}" class="btn btn-success btn-action{% if !has_translations %} disabled{% endif %}">Download</a>
+    {% if has_translations %}
+    <a id="download-btn" href="/api/download/{{ session_id }}" hx-boost="false" class="btn btn-success btn-action">Download</a>
+    {% else %}
+    <span id="download-btn" class="btn btn-success btn-action disabled" aria-disabled="true">Download</span>
+    {% endif %}
 </div>

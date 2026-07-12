@@ -1,8 +1,9 @@
 {# Translation result - shows success with image, or error message #}
+{% if is_translated %}
+<img class="page-image" src="/api/page/{{ session_id }}/{{ page }}?translated=1&amp;version={{ version }}" alt="Translated page {{ page + 1 }}" decoding="async">
+{% endif %}
 {% if is_error %}
 <div class="placeholder error" role="alert">Translation failed: {{ message }}</div>
-{% else %}
-<img class="page-image" src="/api/page/{{ session_id }}/{{ page }}?translated=1" alt="Translated page {{ page + 1 }}" decoding="async">
 {% endif %}
 
 {# Toast notification - auto-dismiss via CSS animation #}
@@ -11,5 +12,5 @@
 {# OOB updates - always send to keep UI in sync #}
 {% include "oob/translate_btn.html" %}
 {% if !is_error %}
-<a id="download-btn" hx-swap-oob="true" href="/api/download/{{ session_id }}" class="btn btn-success btn-action">Download</a>
+<a id="download-btn" hx-swap-oob="true" hx-boost="false" href="/api/download/{{ session_id }}" class="btn btn-success btn-action">Download</a>
 {% endif %}

@@ -1,25 +1,32 @@
+#![allow(
+    clippy::collapsible_if,
+    clippy::expect_used,
+    clippy::print_stdout,
+    clippy::unwrap_used
+)]
+
+use lopdf::{Document, Object, Stream};
 use std::fs;
 use std::path::PathBuf;
-use lopdf::{Document, Object, Stream};
 
 fn main() {
     let home = std::env::var("HOME").unwrap();
     let pdf_path = PathBuf::from(&home).join("Downloads/fablesdelfontain00lfonrich.pdf");
     let pdf_bytes = fs::read(&pdf_path).expect("Failed to read PDF");
-    
+
     let mut doc = Document::load_mem(&pdf_bytes).expect("Failed to load PDF");
-    
+
     // Get first page
     let pages = doc.get_pages();
     let page_id = *pages.get(&1).expect("No first page");
-    
+
     // Add a simple Helvetica font
     let font_id = doc.add_object(lopdf::Dictionary::from_iter([
         ("Type", Object::Name(b"Font".to_vec())),
         ("Subtype", Object::Name(b"Type1".to_vec())),
         ("BaseFont", Object::Name(b"Helvetica".to_vec())),
     ]));
-    
+
     // Get page and update Resources
     let page_obj = doc.get_object_mut(page_id).expect("Failed to get page");
     if let Object::Dictionary(page_dict) = page_obj {
@@ -33,7 +40,7 @@ fn main() {
             page_dict.set("Resources", Object::Dictionary(resources));
         }
     }
-    
+
     // Create a simple test content stream with Helvetica
     let test_content = b"q
 1 1 1 rg
@@ -46,10 +53,10 @@ BT
 ET
 Q
 ";
-    
+
     let content_stream = Stream::new(lopdf::Dictionary::new(), test_content.to_vec());
     let content_id = doc.add_object(Object::Stream(content_stream));
-    
+
     // Append to page contents
     let page_obj = doc.get_object_mut(page_id).expect("Failed to get page");
     if let Object::Dictionary(page_dict) = page_obj {
@@ -58,7 +65,7 @@ Q
             page_dict.set("Contents", Object::Array(arr));
         }
     }
-    
+
     // Save
     let output_path = PathBuf::from(&home).join("Downloads/test_helvetica.pdf");
     let mut output = Vec::new();

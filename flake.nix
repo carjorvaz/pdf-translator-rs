@@ -40,6 +40,7 @@
             nativeBuildInputs = with pkgs; [
               pkg-config
               clang
+              makeWrapper
             ];
 
             buildInputs = with pkgs; [
@@ -54,9 +55,7 @@
               mujs
               libwebp
               fontconfig
-            ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-              darwin.apple_sdk.frameworks.Security
-              darwin.apple_sdk.frameworks.SystemConfiguration
+              zlib
             ];
 
             # mupdf-rs needs these
@@ -70,22 +69,27 @@
 
           pdf-translator-core = craneLib.buildPackage (commonArgs // {
             inherit cargoArtifacts;
+            pname = "pdf-translator-core";
             cargoExtraArgs = "-p pdf-translator-core";
           });
 
           pdf-translator-cli = craneLib.buildPackage (commonArgs // {
             inherit cargoArtifacts;
+            pname = "pdf-translator-cli";
             cargoExtraArgs = "-p pdf-translator-cli";
           });
 
           pdf-translator-web = craneLib.buildPackage (commonArgs // {
             inherit cargoArtifacts;
+            pname = "pdf-translator-web";
             cargoExtraArgs = "-p pdf-translator-web";
 
-            # Copy static files to the output (--no-preserve=mode to allow stripping phase to run sed)
             postInstall = ''
-              mkdir -p $out/share/pdf-translator-web
-              cp -r --no-preserve=mode ${./crates/pdf-translator-web/static} $out/share/pdf-translator-web/static
+              mkdir -p "$out/share/pdf-translator-web/static"
+              cp -r --no-preserve=mode ${./crates/pdf-translator-web/static}/. \
+                "$out/share/pdf-translator-web/static/"
+              wrapProgram "$out/bin/pdf-translator-web" \
+                --set-default STATIC_DIR "$out/share/pdf-translator-web/static"
             '';
           });
         };
@@ -124,13 +128,28 @@
             --n-gpu-layers 0
         '';
 
-        # Test script for the LLM server
+        # Exercise any configured OpenAI-compatible provider without exposing credentials.
         test-llm = pkgs.writeShellScriptBin "test-llm" ''
-          echo "Testing llama.cpp server at localhost:8080..."
-          ${pkgs.curl}/bin/curl -s http://localhost:8080/v1/chat/completions \
+          set -euo pipefail
+
+          API_BASE="''${OPENAI_API_BASE:-http://127.0.0.1:8080/v1}"
+          API_BASE="''${API_BASE%/}"
+          MODEL="''${OPENAI_MODEL:-default_model}"
+          AUTH_HEADERS=()
+          if [[ -n "''${OPENAI_API_KEY:-}" ]]; then
+            AUTH_HEADERS=(-H "Authorization: Bearer $OPENAI_API_KEY")
+          fi
+
+          payload="$(${pkgs.jq}/bin/jq -nc --arg model "$MODEL" \
+            '{model: $model, messages: [{role: "user", content: "Translate to Chinese: Hello world"}]}')"
+          response="$(${pkgs.curl}/bin/curl --fail-with-body --silent --show-error \
+            --max-time 120 "''${AUTH_HEADERS[@]}" \
             -H "Content-Type: application/json" \
-            -d '{"model": "default_model", "messages": [{"role": "user", "content": "Translate to Chinese: Hello world"}]}' \
-            | ${pkgs.jq}/bin/jq -r '.choices[0].message.content'
+            --data "$payload" \
+            "$API_BASE/chat/completions")"
+          content="$(printf '%s' "$response" \
+            | ${pkgs.jq}/bin/jq -er '.choices[0].message.content | select(type == "string" and length > 0)')"
+          printf '%s\n' "$content"
         '';
 
       in
@@ -145,11 +164,20 @@
 
         # Apps for `nix run`
         apps = {
-          cli = flake-utils.lib.mkApp { drv = pdf-translator-cli; };
-          web = flake-utils.lib.mkApp { drv = pdf-translator-web; };
+          cli = flake-utils.lib.mkApp {
+            drv = pdf-translator-cli;
+            exePath = "/bin/pdf-translate";
+          };
+          web = flake-utils.lib.mkApp {
+            drv = pdf-translator-web;
+            exePath = "/bin/pdf-translator-web";
+          };
           serve-model = flake-utils.lib.mkApp { drv = serve-model; };
           test-llm = flake-utils.lib.mkApp { drv = test-llm; };
-          default = flake-utils.lib.mkApp { drv = pdf-translator-cli; };
+          default = flake-utils.lib.mkApp {
+            drv = pdf-translator-cli;
+            exePath = "/bin/pdf-translate";
+          };
         };
 
         devShells.default = craneLib.devShell {
@@ -226,6 +254,7 @@
 
           # Rustfmt check
           fmt = craneLib.cargoFmt {
+            pname = "pdf-translator-fmt";
             src = craneLib.cleanCargoSource ./.;
           };
 
@@ -239,6 +268,30 @@
           test = craneLib.cargoTest (commonArgs // {
             inherit cargoArtifacts;
           });
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          nixos-service = pkgs.testers.nixosTest {
+            name = "pdf-translator-service";
+
+            nodes.machine = { pkgs, ... }: {
+              imports = [ self.nixosModules.pdf-translator ];
+              services.pdf-translator = {
+                enable = true;
+                package = pdf-translator-web;
+                host = "127.0.0.1";
+                port = 3000;
+                apiBase = "http://127.0.0.1:65535/v1";
+              };
+              environment.systemPackages = [ pkgs.curl ];
+            };
+
+            testScript = ''
+              machine.start()
+              machine.wait_for_unit("pdf-translator.service")
+              machine.wait_for_open_port(3000)
+              machine.succeed("systemctl is-active --quiet pdf-translator.service")
+              machine.succeed("curl --fail --silent http://127.0.0.1:3000/ | grep -q 'PDF Translator'")
+            '';
+          };
         };
       }
     ) // {
@@ -270,11 +323,6 @@
               description = "Port to bind the web server to.";
             };
 
-            openFirewall = lib.mkOption {
-              type = lib.types.bool;
-              default = false;
-              description = "Whether to open the firewall for the web server port.";
-            };
 
             apiBase = lib.mkOption {
               type = lib.types.str;
@@ -283,11 +331,12 @@
             };
 
             apiKeyFile = lib.mkOption {
-              type = lib.types.nullOr lib.types.path;
+              type = lib.types.nullOr (lib.types.strMatching "^/.*");
               default = null;
+              example = "/run/keys/pdf-translator-api-key";
               description = ''
-                Path to a file containing the API key for the LLM service.
-                The file should contain only the API key, with no trailing newline.
+                Runtime path to a file containing the API key for the LLM service.
+                The path is kept as a string so Nix never copies the secret into the store.
               '';
             };
 
@@ -321,7 +370,22 @@
           };
 
           config = lib.mkIf cfg.enable {
-            networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [ cfg.port ];
+            assertions = [
+              {
+                assertion =
+                  cfg.apiKeyFile == null
+                  || (
+                    cfg.apiKeyFile != "/nix/store"
+                    && !lib.hasPrefix "/nix/store/" cfg.apiKeyFile
+                  );
+                message = "services.pdf-translator.apiKeyFile must refer to a runtime path outside /nix/store";
+              }
+              {
+                assertion = builtins.elem cfg.host [ "127.0.0.1" "::1" ];
+                message = "services.pdf-translator.host must be a loopback IP address";
+              }
+            ];
+
 
             systemd.services.pdf-translator =
               let

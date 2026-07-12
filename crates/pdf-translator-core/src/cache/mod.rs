@@ -1,10 +1,10 @@
-mod memory;
 mod disk;
 mod key;
+mod memory;
 
-pub use memory::MemoryCache;
 pub use disk::DiskCache;
 pub use key::CacheKey;
+pub use memory::MemoryCache;
 
 use std::sync::Arc;
 
@@ -38,8 +38,8 @@ impl TranslationCache {
 
         let disk = if config.disk_enabled {
             let path = config.disk_path.clone().unwrap_or_else(|| {
-                let cache_dir = crate::util::cache_dir()
-                    .unwrap_or_else(|| std::path::PathBuf::from(".cache"));
+                let cache_dir =
+                    crate::util::cache_dir().unwrap_or_else(|| std::path::PathBuf::from(".cache"));
                 cache_dir.join("pdf-translator")
             });
             Some(DiskCache::new(path)?)
@@ -56,25 +56,23 @@ impl TranslationCache {
         let key_str = key.to_string();
 
         // Try memory cache first
-        if let Some(ref memory) = self.inner.memory
-            && let Some(value) = memory.get(&key_str).await {
-                return Some(value);
-            }
+        if let Some(memory) = &self.inner.memory
+            && let Some(value) = memory.get(&key_str).await
+        {
+            return Some(value);
+        }
 
         // Try disk cache (blocking I/O, offloaded to blocking thread)
-        if self.inner.disk.is_some() {
-            let inner = Arc::clone(&self.inner);
+        if let Some(disk) = self.inner.disk.clone() {
             let disk_key = key_str.clone();
-            let disk_result = tokio::task::spawn_blocking(move || {
-                inner.disk.as_ref().unwrap().get(&disk_key)
-            })
-            .await
-            .ok()
-            .flatten();
+            let disk_result = tokio::task::spawn_blocking(move || disk.get(&disk_key))
+                .await
+                .ok()
+                .flatten();
 
             if let Some(value) = disk_result {
                 // Populate memory cache on disk hit
-                if let Some(ref memory) = self.inner.memory {
+                if let Some(memory) = &self.inner.memory {
                     memory.insert(key_str, value.clone()).await;
                 }
                 return Some(value);
@@ -88,17 +86,16 @@ impl TranslationCache {
         let key_str = key.to_string();
 
         // Store in memory cache
-        if let Some(ref memory) = self.inner.memory {
+        if let Some(memory) = &self.inner.memory {
             memory.insert(key_str.clone(), value.clone()).await;
         }
 
         // Store in disk cache (blocking I/O, offloaded to blocking thread)
-        if self.inner.disk.is_some() {
-            let inner = Arc::clone(&self.inner);
+        if let Some(disk) = self.inner.disk.clone() {
             let disk_key = key_str;
             let disk_value = value;
             let _ = tokio::task::spawn_blocking(move || {
-                if let Err(e) = inner.disk.as_ref().unwrap().insert(&disk_key, &disk_value) {
+                if let Err(e) = disk.insert(&disk_key, &disk_value) {
                     tracing::warn!("Failed to write to disk cache: {e}");
                 }
             })
@@ -111,14 +108,14 @@ impl TranslationCache {
     }
 
     pub fn clear(&self) {
-        if let Some(ref memory) = self.inner.memory {
+        if let Some(memory) = &self.inner.memory {
             memory.clear();
         }
 
-        if let Some(ref disk) = self.inner.disk {
-            if let Err(e) = disk.clear() {
-                tracing::warn!("Failed to clear disk cache: {e}");
-            }
+        if let Some(disk) = &self.inner.disk
+            && let Err(e) = disk.clear()
+        {
+            tracing::warn!("Failed to clear disk cache: {e}");
         }
     }
 }

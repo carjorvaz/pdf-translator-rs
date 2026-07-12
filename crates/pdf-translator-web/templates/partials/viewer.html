@@ -16,8 +16,22 @@
                      hx-target="#translated-content"
                      hx-swap="innerHTML"
                      hx-indicator="#panel-loading"
-                     hx-disabled-elt="#translate-btn, #translate-all-btn">
-                    Translating...
+                     hx-disabled-elt="#translate-btn, #translate-all-btn"
+                     hx-sync="#app:abort"
+                     _="on htmx:beforeRequest
+                            set #auto-translate-status.innerText to 'Translating...'
+                            add @hidden to #auto-translate-retry
+                        on htmx:responseError or htmx:sendError
+                            set #auto-translate-status.innerText to 'Translation failed. Select Try again to retry.'
+                            remove @hidden from #auto-translate-retry">
+                    <span id="auto-translate-status">Translating...</span>
+                    <button id="auto-translate-retry" type="button" class="btn btn-primary" hidden
+                            hx-post="/api/translate/{{ session_id }}/{{ page + 1 }}"
+                            hx-target="#translated-content"
+                            hx-swap="innerHTML"
+                            hx-indicator="#panel-loading"
+                            hx-disabled-elt="this, #translate-btn, #translate-all-btn"
+                            hx-sync="#app:abort">Try again</button>
                 </div>
                 {% else %}
                 <div class="placeholder">Click "Translate" to see translation</div>

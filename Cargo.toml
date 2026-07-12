@@ -23,12 +23,12 @@ tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-anyhow = "1"
+anyhow = "1.0.103"
 
 # PDF processing
-mupdf = "0.4"
-lopdf = "0.36"
-image = "0.25"
+mupdf = { version = "0.4", default-features = false, features = ["sys-lib"] }
+lopdf = { git = "https://github.com/J-F-Liu/lopdf", rev = "8c454dd93d9c37e608c552a2b304d1d31d1cb2e1" }
+image = { version = "0.25", default-features = false, features = ["png"] }
 webp = "0.3"
 
 # HTTP & Web
@@ -36,7 +36,6 @@ reqwest = { version = "0.12", features = ["json"] }
 axum = "0.8"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "cors", "trace", "compression-gzip", "set-header"] }
-tower-sessions = "0.14"
 
 # Templates
 askama = "0.15"
@@ -44,7 +43,6 @@ askama_web = { version = "0.15", features = ["axum-0.8"] }
 
 # Caching
 moka = { version = "0.12", features = ["future"] }
-sled = "0.34"
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
@@ -68,12 +66,12 @@ dotenvy = "0.15"
 md5 = "0.7"
 uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
-bytes = "1"
+bytes = "1.11.1"
 mime_guess = "2"
 urlencoding = "2"
 
 # Font handling
-ttf-parser = "0.25"
+skrifa = "0.44"
 
 # Strict lints for the entire workspace
 [workspace.lints.rust]

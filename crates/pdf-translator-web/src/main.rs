@@ -7,29 +7,28 @@ mod state;
 mod templates;
 
 use anyhow::{Context, Result};
+use axum::http::{HeaderValue, header};
 use axum::{
+    Router,
     extract::DefaultBodyLimit,
     routing::{get, post},
-    Router,
 };
 use clap::Parser;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
-use axum::http::{header, HeaderValue};
+use std::time::Duration;
 use tower::ServiceBuilder;
 use tower_http::{
-    compression::CompressionLayer,
-    cors::CorsLayer,
-    services::ServeDir,
-    set_header::SetResponseHeaderLayer,
+    compression::CompressionLayer, services::ServeDir, set_header::SetResponseHeaderLayer,
     trace::TraceLayer,
 };
-use std::time::Duration;
-use tracing::info;
-use tracing_subscriber::{fmt, EnvFilter, prelude::*};
+use tracing::{info, warn};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use state::AppState;
+
+pub(crate) const UPLOAD_BODY_LIMIT: usize = 64 * 1024 * 1024;
 
 /// Resolve the static files directory.
 ///
@@ -56,21 +55,21 @@ fn resolve_static_dir(explicit_path: Option<&str>) -> PathBuf {
 #[command(name = "pdf-translator-web")]
 #[command(author, version, about = "PDF Translator Web Server", long_about = None)]
 struct Args {
-    /// Host to bind to
+    /// Loopback IP address to bind to
     #[arg(long, default_value = "127.0.0.1")]
-    host: String,
+    host: IpAddr,
 
     /// Port to bind to
     #[arg(short, long, default_value = "3000")]
     port: u16,
 
     /// OpenAI API base URL
-    #[arg(long, env = "OPENAI_API_BASE", default_value = "http://localhost:8080/v1")]
+    #[arg(
+        long,
+        env = "OPENAI_API_BASE",
+        default_value = "http://localhost:8080/v1"
+    )]
     api_base: String,
-
-    /// OpenAI API key
-    #[arg(long, env = "OPENAI_API_KEY")]
-    api_key: Option<String>,
 
     /// Model name for OpenAI-compatible API
     #[arg(long, env = "OPENAI_MODEL", default_value = "default_model")]
@@ -89,12 +88,49 @@ struct Args {
     clear_cache: bool,
 }
 
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            warn!("Failed to install SIGINT handler: {error}");
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => {
+                warn!("Failed to install SIGTERM handler: {error}");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {}
+        () = terminate => {}
+    }
+
+    info!("Shutdown signal received");
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load .env file if present (before parsing args so env vars are available)
     dotenvy::dotenv().ok();
 
     let args = Args::parse();
+
+    if !args.host.is_loopback() {
+        anyhow::bail!("refusing to bind non-loopback address {}", args.host);
+    }
+
+    let api_key = std::env::var("OPENAI_API_KEY").ok();
 
     // Setup logging with per-crate filtering
     // font_kit emits many "Error loading font from handle: Parse" warnings for
@@ -106,9 +142,7 @@ async fn main() -> Result<()> {
     };
 
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| {
-            EnvFilter::new(format!("{default_level},font_kit=error"))
-        });
+        .unwrap_or_else(|_| EnvFilter::new(format!("{default_level},font_kit=error")));
 
     tracing_subscriber::registry()
         .with(fmt::layer().with_target(false))
@@ -125,17 +159,20 @@ async fn main() -> Result<()> {
 
     // Create application state (opens cache - fails fast if locked)
     let state = Arc::new(
-        AppState::new(args.api_base, args.api_key, args.model)
-            .context("Failed to initialize application state")?
+        AppState::new(args.api_base, api_key, args.model)
+            .context("Failed to initialize application state")?,
     );
 
     // Spawn background task for session cleanup (runs every 5 minutes)
-    let cleanup_state = Arc::clone(&state);
-    tokio::spawn(async move {
+    let cleanup_state = Arc::downgrade(&state);
+    let cleanup_task = tokio::spawn(async move {
         let cleanup_interval = Duration::from_secs(5 * 60); // 5 minutes
         loop {
             tokio::time::sleep(cleanup_interval).await;
-            cleanup_state.cleanup_old_sessions().await;
+            let Some(state) = cleanup_state.upgrade() else {
+                break;
+            };
+            state.cleanup_old_sessions().await;
             info!("Completed session cleanup");
         }
     });
@@ -148,16 +185,40 @@ async fn main() -> Result<()> {
         .route("/view/{session_id}/{page}", get(routes::view_page))
         // API endpoints - HTML fragments (HTMX)
         .route("/api/upload", post(routes::upload_pdf))
-        .route("/api/page-view/{session_id}/{page}", get(routes::get_page_view))
+        .route(
+            "/api/page-view/{session_id}/{page}",
+            get(routes::get_page_view),
+        )
         // Query-based page view for HTMX page input (hypermedia control)
-        .route("/api/page-view/{session_id}", get(routes::get_page_view_query))
-        .route("/api/translate/{session_id}/{page}", post(routes::translate_page))
-        .route("/api/prefetch/{session_id}/{page}", post(routes::prefetch_page))
-        .route("/api/translate-all/{session_id}/start", post(routes::start_translate_all))
-        .route("/api/translate-all/{session_id}/stream", get(routes::translate_all_stream))
+        .route(
+            "/api/page-view/{session_id}",
+            get(routes::get_page_view_query),
+        )
+        .route(
+            "/api/translate/{session_id}/{page}",
+            post(routes::translate_page),
+        )
+        .route(
+            "/api/prefetch/{session_id}/{page}",
+            post(routes::prefetch_page),
+        )
+        .route(
+            "/api/translate-all/{session_id}/start",
+            post(routes::start_translate_all),
+        )
+        .route(
+            "/api/translate-all/{session_id}/stream",
+            get(routes::translate_all_stream),
+        )
         .route("/api/settings/{session_id}", post(routes::update_settings))
-        .route("/api/auto-translate/{session_id}", post(routes::toggle_auto_translate))
-        .route("/api/view-mode/{session_id}/{mode}", post(routes::set_view_mode))
+        .route(
+            "/api/auto-translate/{session_id}",
+            post(routes::toggle_auto_translate),
+        )
+        .route(
+            "/api/view-mode/{session_id}/{page}/{mode}",
+            post(routes::set_view_mode),
+        )
         // API endpoints - binary responses
         .route("/api/page/{session_id}/{page}", get(routes::get_page_image))
         .route("/api/download/{session_id}", get(routes::download_pdf))
@@ -169,7 +230,9 @@ async fn main() -> Result<()> {
                     header::CACHE_CONTROL,
                     HeaderValue::from_static("no-cache"),
                 ))
-                .service(ServeDir::new(resolve_static_dir(args.static_dir.as_deref()))),
+                .service(ServeDir::new(resolve_static_dir(
+                    args.static_dir.as_deref(),
+                ))),
         )
         // Middleware
         // Cache-Control for HTML fragments - prevents bfcache issues with HTMX
@@ -179,16 +242,21 @@ async fn main() -> Result<()> {
             HeaderValue::from_static("no-store, max-age=0"),
         ))
         .layer(CompressionLayer::new()) // Gzip compression for responses
-        .layer(DefaultBodyLimit::max(300 * 1024 * 1024)) // 300MB limit for uploads
+        .layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT))
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
         .with_state(state);
 
-    let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
+    let addr = SocketAddr::new(args.host, args.port);
     info!("Starting server at http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    let serve_result = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await;
+
+    cleanup_task.abort();
+    let _ = cleanup_task.await;
+    serve_result?;
 
     Ok(())
 }

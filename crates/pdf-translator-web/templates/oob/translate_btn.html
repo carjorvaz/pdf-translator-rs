@@ -6,7 +6,7 @@
         hx-swap="innerHTML"
         hx-indicator="#panel-loading"
         hx-disabled-elt="#translate-btn, #translate-all-btn"
-        hx-sync="this:abort"
+        hx-sync="#app:abort"
         {% if is_translated %}hx-vals='{"force": "1"}'{% endif %}
         _="on htmx:beforeRequest add .loading to me on htmx:afterRequest remove .loading from me"
         class="btn btn-action {% if is_translated %}btn-secondary{% else %}btn-primary{% endif %}">

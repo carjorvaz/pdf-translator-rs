@@ -38,7 +38,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 # Progress
-indicatif = "0.17"
+indicatif = "0.18"
 
 [lints]
 workspace = true

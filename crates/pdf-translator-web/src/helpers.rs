@@ -30,18 +30,11 @@ impl<T> OptionExt<T> for Option<T> {
 pub trait ResultExt<T, E: std::fmt::Display> {
     /// Converts the error to 500 Internal Server Error.
     fn or_internal_error(self) -> RouteResult<T>;
-
-    /// Converts the error to 400 Bad Request.
-    fn or_bad_request(self) -> RouteResult<T>;
 }
 
 impl<T, E: std::fmt::Display> ResultExt<T, E> for Result<T, E> {
     fn or_internal_error(self) -> RouteResult<T> {
         self.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
-    }
-
-    fn or_bad_request(self) -> RouteResult<T> {
-        self.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
     }
 }
 

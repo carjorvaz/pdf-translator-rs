@@ -13,15 +13,15 @@ pub mod pdf;
 pub mod translator;
 pub mod util;
 
+pub use cache::{CacheKey, TranslationCache};
 pub use config::{
-    AppConfig, Lang, LanguageOption, TextColor, TranslatorConfig,
-    source_languages, target_languages, flag_for_lang,
-    DEFAULT_SOURCE_LANG, DEFAULT_TARGET_LANG, DEFAULT_TEXT_COLOR,
+    AppConfig, DEFAULT_SOURCE_LANG, DEFAULT_TARGET_LANG, DEFAULT_TEXT_COLOR, Lang, LanguageOption,
+    TextColor, TranslatorCacheIdentity, TranslatorConfig, flag_for_lang, source_languages,
+    target_languages,
 };
 pub use error::{Error, Result};
-pub use pdf::{BoundingBox, PdfDocument, TextBlock, PageRenderer, PdfOverlay, OverlayOptions};
-pub use translator::{Translator, OpenAiTranslator, create_translator};
-pub use cache::{TranslationCache, CacheKey};
+pub use pdf::{BoundingBox, OverlayOptions, PageRenderer, PdfDocument, PdfOverlay, TextBlock};
+pub use translator::{OpenAiTranslator, Translator, create_translator};
 pub use util::clear_translation_cache;
 
 use std::sync::Arc;
@@ -69,10 +69,7 @@ impl PdfTranslator {
     }
 
     /// Create with a custom translator
-    pub fn with_translator(
-        translator: Arc<dyn Translator>,
-        config: AppConfig,
-    ) -> Result<Self> {
+    pub fn with_translator(translator: Arc<dyn Translator>, config: AppConfig) -> Result<Self> {
         let cache = TranslationCache::new(&config.cache)?;
 
         Ok(Self {
@@ -107,7 +104,8 @@ impl PdfTranslator {
         doc: &PdfDocument,
         page_num: usize,
     ) -> Result<TranslatedPage> {
-        self.translate_page_impl(doc, page_num, false, Some("(prefetch)")).await
+        self.translate_page_impl(doc, page_num, false, Some("(prefetch)"))
+            .await
     }
 
     /// Internal implementation of translate_page
@@ -118,31 +116,48 @@ impl PdfTranslator {
         force: bool,
         label: Option<&str>,
     ) -> Result<TranslatedPage> {
-        // Extract text blocks (single PDF parse, used for both cache key and translation)
-        let extractor = pdf::TextExtractor::new(doc);
-        let blocks = extractor.extract_page_blocks(page_num)?;
+        // MuPDF parsing is synchronous and must not block an async runtime worker.
+        let extraction_doc = doc.clone();
+        let blocks = tokio::task::spawn_blocking(move || {
+            let extractor = pdf::TextExtractor::new(&extraction_doc);
+            extractor.extract_page_blocks(page_num)
+        })
+        .await
+        .map_err(|_| Error::PdfTextExtraction {
+            page: page_num,
+            reason: "text extraction worker failed".to_string(),
+        })??;
 
-        // Derive plain text for cache key from extracted blocks
-        let page_text: String = blocks.iter()
-            .map(|b| b.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let text_len = blocks
+            .iter()
+            .try_fold(0usize, |total, block| total.checked_add(block.text.len()));
+        let capacity = text_len
+            .and_then(|length| length.checked_add(blocks.len().saturating_sub(1)))
+            .ok_or_else(|| Error::CacheKeyGeneration("page text length overflow".to_string()))?;
+        let mut page_text = String::new();
+        page_text.try_reserve_exact(capacity).map_err(|_| {
+            Error::CacheKeyGeneration("page text is too large to cache".to_string())
+        })?;
+        for (index, block) in blocks.iter().enumerate() {
+            if index != 0 {
+                page_text.push('\n');
+            }
+            page_text.push_str(&block.text);
+        }
 
-        // Generate cache key
+        let translator_identity = self.translator.cache_identity();
         let cache_key = CacheKey::from_page(
             doc.cache_id(),
             page_num,
             &page_text,
-            self.translator.name(),
+            &translator_identity,
             &self.config.source_lang,
             &self.config.target_lang,
             self.config.text_color,
         );
 
         // Check cache (unless force is set)
-        if !force
-            && let Some(cached) = self.cache.get(&cache_key).await
-        {
+        if !force && let Some(cached) = self.cache.get(&cache_key).await {
             debug!("Cache hit for page {}", page_num);
             return Ok(TranslatedPage {
                 page_num,
@@ -168,7 +183,11 @@ impl PdfTranslator {
 
             let translated = self
                 .translator
-                .translate(&block.text, &self.config.source_lang, &self.config.target_lang)
+                .translate(
+                    &block.text,
+                    &self.config.source_lang,
+                    &self.config.target_lang,
+                )
                 .await?;
 
             overlays.push(pdf::overlay::TranslationOverlay {
@@ -179,14 +198,18 @@ impl PdfTranslator {
             });
         }
 
-        // Create PDF overlay
+        // lopdf overlay generation is synchronous and uses owned inputs off-runtime.
         let overlay_options = OverlayOptions {
             text_color: self.config.text_color,
             ..Default::default()
         };
-
-        let overlay = PdfOverlay::new(overlay_options);
-        let pdf_bytes = overlay.create_translated_page(doc.bytes(), page_num, &overlays)?;
+        let pdf_data = doc.bytes_arc();
+        let pdf_bytes = tokio::task::spawn_blocking(move || {
+            let overlay = PdfOverlay::new(overlay_options);
+            overlay.create_translated_page(pdf_data.as_slice(), page_num, &overlays)
+        })
+        .await
+        .map_err(|_| Error::PdfOverlay("overlay worker failed".to_string()))??;
 
         // Store in cache
         self.cache.insert(&cache_key, pdf_bytes.clone()).await;
@@ -211,13 +234,14 @@ impl PdfTranslator {
             let result = self.translate_page(doc, page_num).await?;
             translated_pages.push(result.pdf_bytes);
 
-            if let Some(ref callback) = progress_callback {
+            if let Some(callback) = &progress_callback {
                 callback(page_num + 1, total_pages);
             }
         }
 
-        // Combine all pages
-        pdf::overlay::combine_pdfs(&translated_pages)
+        tokio::task::spawn_blocking(move || pdf::overlay::combine_pdfs(&translated_pages))
+            .await
+            .map_err(|_| Error::PdfOverlay("PDF combination worker failed".to_string()))?
     }
 
     pub const fn config(&self) -> &AppConfig {
@@ -234,21 +258,13 @@ impl PdfTranslator {
 }
 
 /// Convenience function to render a page from a document as PNG
-pub fn render_page(
-    doc: &PdfDocument,
-    page_num: usize,
-    scale: f32,
-) -> Result<Vec<u8>> {
+pub fn render_page(doc: &PdfDocument, page_num: usize, scale: f32) -> Result<Vec<u8>> {
     let renderer = PageRenderer::with_scale(doc, scale);
     renderer.render_page_png(page_num)
 }
 
 /// Convenience function to render a page from a document as WebP (lossless)
-pub fn render_page_webp(
-    doc: &PdfDocument,
-    page_num: usize,
-    scale: f32,
-) -> Result<Vec<u8>> {
+pub fn render_page_webp(doc: &PdfDocument, page_num: usize, scale: f32) -> Result<Vec<u8>> {
     let renderer = PageRenderer::with_scale(doc, scale);
     renderer.render_page_webp(page_num)
 }

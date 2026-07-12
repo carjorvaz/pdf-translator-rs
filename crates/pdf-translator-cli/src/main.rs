@@ -1,13 +1,17 @@
 //! PDF Translator CLI - Command line tool for translating PDF documents.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
 use pdf_translator_core::{AppConfig, Lang, PdfDocument, PdfTranslator, TextColor};
-use std::path::PathBuf;
-use tracing::{info, Level};
+use std::ffi::OsString;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::{Level, info};
 use tracing_subscriber::FmtSubscriber;
-
 
 #[derive(Debug, Clone, ValueEnum)]
 enum ColorOption {
@@ -38,33 +42,33 @@ struct Args {
     #[arg(required = true)]
     input: PathBuf,
 
-    /// Output PDF file (default: input-<target>.pdf)
+    /// Output PDF file (default: `input-<target>.pdf`)
     #[arg(short, long)]
     output: Option<PathBuf>,
 
     /// Source language code
-    #[arg(short = 's', long, default_value = "fr")]
-    source: String,
+    #[arg(short = 's', long)]
+    source: Option<String>,
 
     /// Target language code
-    #[arg(short = 't', long, default_value = "en")]
-    target: String,
+    #[arg(short = 't', long)]
+    target: Option<String>,
 
     /// OpenAI API base URL
-    #[arg(long, env = "OPENAI_API_BASE", default_value = "http://localhost:8080/v1")]
-    api_base: String,
+    #[arg(long, env = "OPENAI_API_BASE")]
+    api_base: Option<String>,
 
     /// OpenAI API key
     #[arg(long, env = "OPENAI_API_KEY")]
     api_key: Option<String>,
 
     /// Model name for OpenAI-compatible API
-    #[arg(long, env = "OPENAI_MODEL", default_value = "default_model")]
-    model: String,
+    #[arg(long, env = "OPENAI_MODEL")]
+    model: Option<String>,
 
     /// Translation text color
-    #[arg(long, value_enum, default_value = "dark-red")]
-    color: ColorOption,
+    #[arg(long, value_enum)]
+    color: Option<ColorOption>,
 
     /// Config file path
     #[arg(short, long)]
@@ -79,37 +83,181 @@ struct Args {
     pages: Option<String>,
 
     /// Disable caching
-    #[arg(long)]
-    no_cache: bool,
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    no_cache: Option<bool>,
 }
 
 fn parse_page_range(pages: &str, total: usize) -> Result<Vec<usize>> {
-    let mut result = Vec::new();
+    if pages.trim().is_empty() {
+        bail!("Page range cannot be empty");
+    }
 
-    for part in pages.split(',') {
-        let part = part.trim();
-        if part.contains('-') {
-            let range: Vec<&str> = part.split('-').collect();
-            if range.len() == 2 {
-                let start: usize = range[0].parse().context("Invalid page range start")?;
-                let end: usize = range[1].parse().context("Invalid page range end")?;
-                for p in start..=end {
-                    if p > 0 && p <= total {
-                        result.push(p - 1); // Convert to 0-indexed
-                    }
-                }
+    // Validate the entire specification before expanding any range. This makes malformed
+    // or enormous endpoints fail without partially iterating an earlier component.
+    for component in pages.split(',') {
+        let component = component.trim();
+        if component.is_empty() {
+            bail!("Page range contains an empty component");
+        }
+
+        if let Some((start, end)) = component.split_once('-') {
+            if start.is_empty() || end.is_empty() || end.contains('-') {
+                bail!("Invalid page range: {component}");
+            }
+            let start = start.parse::<usize>().context("Invalid page range start")?;
+            let end = end.parse::<usize>().context("Invalid page range end")?;
+            validate_page(start, total)?;
+            validate_page(end, total)?;
+            if start > end {
+                bail!("Page range is reversed: {component}");
             }
         } else {
-            let page: usize = part.parse().context("Invalid page number")?;
-            if page > 0 && page <= total {
-                result.push(page - 1); // Convert to 0-indexed
-            }
+            let page = component.parse::<usize>().context("Invalid page number")?;
+            validate_page(page, total)?;
+        }
+    }
+
+    let mut result = Vec::new();
+    for component in pages.split(',').map(str::trim) {
+        if let Some((start, end)) = component.split_once('-') {
+            let start = start.parse::<usize>().context("Invalid page range start")?;
+            let end = end.parse::<usize>().context("Invalid page range end")?;
+            result.extend((start..=end).map(|page| page - 1));
+        } else {
+            let page = component.parse::<usize>().context("Invalid page number")?;
+            result.push(page - 1);
         }
     }
 
     result.sort_unstable();
     result.dedup();
     Ok(result)
+}
+
+fn validate_page(page: usize, total: usize) -> Result<()> {
+    if page == 0 {
+        bail!("Page numbers start at 1");
+    }
+    if page > total {
+        bail!("Page {page} is out of range for a {total}-page document");
+    }
+    Ok(())
+}
+
+fn output_parent(output: &Path) -> &Path {
+    output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn resolved_output_path(input: &Path, output: Option<PathBuf>, target: &Lang) -> PathBuf {
+    output.unwrap_or_else(|| {
+        let stem = input
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("output");
+        input.with_file_name(format!("{stem}-{target}.pdf"))
+    })
+}
+
+fn reject_input_alias(input: &Path, output: &Path) -> Result<()> {
+    let input_canonical = input
+        .canonicalize()
+        .with_context(|| format!("Failed to resolve input path: {}", input.display()))?;
+
+    if output.exists() {
+        let output_canonical = output
+            .canonicalize()
+            .with_context(|| format!("Failed to resolve output path: {}", output.display()))?;
+        if input_canonical == output_canonical {
+            bail!("Output path aliases the input PDF");
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            let input_metadata = std::fs::metadata(&input_canonical)?;
+            let output_metadata = std::fs::metadata(&output_canonical)?;
+            if input_metadata.dev() == output_metadata.dev()
+                && input_metadata.ino() == output_metadata.ino()
+            {
+                bail!("Output path aliases the input PDF");
+            }
+        }
+    } else {
+        let parent = output_parent(output);
+        let file_name = output.file_name().context("Output path must name a file")?;
+        let resolved_output = parent
+            .canonicalize()
+            .with_context(|| format!("Failed to resolve output directory: {}", parent.display()))?
+            .join(file_name);
+        if input_canonical == resolved_output {
+            bail!("Output path aliases the input PDF");
+        }
+    }
+
+    Ok(())
+}
+
+fn create_temp_output(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+fn write_atomic(output: &Path, bytes: &[u8]) -> Result<()> {
+    static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+    let parent = output_parent(output);
+    let file_name = output.file_name().context("Output path must name a file")?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("System clock is before the Unix epoch")?
+        .as_nanos();
+    let process_id = std::process::id();
+
+    let (temp_path, mut temp_file) = (0..128)
+        .find_map(|attempt| {
+            let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+            let mut temp_name = OsString::from(".");
+            temp_name.push(file_name);
+            temp_name.push(format!(".tmp-{process_id}-{timestamp}-{id}-{attempt}"));
+            let path = parent.join(temp_name);
+            match create_temp_output(&path) {
+                Ok(file) => Some(Ok((path, file))),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(error) => Some(Err(error)),
+            }
+        })
+        .context("Could not allocate a unique temporary output file")?
+        .with_context(|| format!("Failed to create temporary output in {}", parent.display()))?;
+
+    let staged = (|| -> Result<()> {
+        temp_file.write_all(bytes)?;
+        temp_file.sync_all()?;
+        Ok(())
+    })();
+    drop(temp_file);
+
+    if let Err(error) = staged {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error).context("Failed to stage translated PDF");
+    }
+
+    if let Err(error) = std::fs::rename(&temp_path, output) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error)
+            .with_context(|| format!("Failed to persist output: {}", output.display()));
+    }
+
+    Ok(())
 }
 
 #[tokio::main]
@@ -139,20 +287,32 @@ async fn main() -> Result<()> {
         AppConfig::load()
     };
 
-    // Override config with CLI arguments
-    config.source_lang = Lang::new(&args.source);
-    config.target_lang = Lang::new(&args.target);
-    config.text_color = args.color.into();
-
-    if args.no_cache {
+    // Apply only values explicitly supplied by the CLI or its declared environment sources.
+    if let Some(source) = args.source.as_deref() {
+        config.source_lang = Lang::new(source);
+    }
+    if let Some(target) = args.target.as_deref() {
+        config.target_lang = Lang::new(target);
+    }
+    if let Some(color) = args.color {
+        config.text_color = color.into();
+    }
+    if let Some(api_base) = args.api_base {
+        config.translator.api_base = api_base;
+    }
+    if let Some(api_key) = args.api_key {
+        config.translator.api_key = Some(api_key);
+    }
+    if let Some(model) = args.model {
+        config.translator.model = model;
+    }
+    if args.no_cache == Some(true) {
         config.cache.memory_enabled = false;
         config.cache.disk_enabled = false;
     }
 
-    // Configure translator
-    config.translator =
-        pdf_translator_core::TranslatorConfig::new(args.api_base, args.api_key, args.model);
-
+    let output_path = resolved_output_path(&args.input, args.output, &config.target_lang);
+    reject_input_alias(&args.input, &output_path)?;
     // Load input PDF
     info!("Loading PDF: {}", args.input.display());
     let doc = PdfDocument::from_file(&args.input)
@@ -175,8 +335,8 @@ async fn main() -> Result<()> {
     info!("Translating {} pages", pages.len());
 
     // Create translator
-    let translator = PdfTranslator::new(config.clone())
-        .context("Failed to initialize translator")?;
+    let translator =
+        PdfTranslator::new(config.clone()).context("Failed to initialize translator")?;
 
     // Setup progress bar
     #[allow(clippy::cast_possible_truncation)]
@@ -185,7 +345,9 @@ async fn main() -> Result<()> {
     #[allow(clippy::unwrap_used)]
     pb.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+            .template(
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+            )
             .unwrap()
             .progress_chars("#>-"),
     );
@@ -215,19 +377,7 @@ async fn main() -> Result<()> {
     let output_bytes = pdf_translator_core::pdf::overlay::combine_pdfs(&translated_pages)
         .context("Failed to combine translated pages")?;
 
-    // Determine output path
-    let output_path = args.output.unwrap_or_else(|| {
-        let stem = args
-            .input
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("output");
-        args.input.with_file_name(format!("{}-{}.pdf", stem, args.target))
-    });
-
-    // Save output
-    std::fs::write(&output_path, output_bytes)
-        .context(format!("Failed to write output: {}", output_path.display()))?;
+    write_atomic(&output_path, &output_bytes)?;
 
     // CLI output is intentional
     #[allow(clippy::print_stdout)]

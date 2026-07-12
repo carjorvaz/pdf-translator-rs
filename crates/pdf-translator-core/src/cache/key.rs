@@ -1,4 +1,11 @@
-use crate::config::{Lang, TextColor};
+use crate::config::{Lang, TextColor, TranslatorCacheIdentity};
+
+const _: () = assert!(usize::BITS <= u64::BITS);
+
+#[allow(clippy::cast_possible_truncation)]
+const fn usize_as_u64(value: usize) -> u64 {
+    value as u64
+}
 
 /// Cache key for translated PDF pages.
 ///
@@ -16,29 +23,32 @@ impl CacheKey {
         doc_id: impl AsRef<str>,
         page_num: usize,
         text_content: &str,
-        translator: &str,
+        translator: &TranslatorCacheIdentity,
         source_lang: &Lang,
         target_lang: &Lang,
         text_color: TextColor,
     ) -> Self {
-        // Combine all inputs into a single string for hashing.
-        // Using null bytes as separators prevents collision between
-        // inputs like ("a", "bc") and ("ab", "c").
-        let combined = format!(
-            "{}\0{}\0{}\0{}\0{}\0{}\0{},{},{}",
-            doc_id.as_ref(),
-            page_num,
-            text_content,
-            translator.to_lowercase(),
-            source_lang.as_str(),
-            target_lang.as_str(),
-            text_color.r,
-            text_color.g,
-            text_color.b,
-        );
+        fn consume_field(context: &mut md5::Context, value: &[u8]) {
+            context.consume(usize_as_u64(value.len()).to_be_bytes());
+            context.consume(value);
+        }
+
+        let mut context = md5::Context::new();
+        consume_field(&mut context, b"pdf-translator-cache-key-v2");
+        consume_field(&mut context, doc_id.as_ref().as_bytes());
+        context.consume(usize_as_u64(page_num).to_be_bytes());
+        consume_field(&mut context, text_content.as_bytes());
+        consume_field(&mut context, translator.backend().as_bytes());
+        consume_field(&mut context, translator.endpoint().as_bytes());
+        consume_field(&mut context, translator.model().as_bytes());
+        consume_field(&mut context, source_lang.as_str().as_bytes());
+        consume_field(&mut context, target_lang.as_str().as_bytes());
+        context.consume(text_color.r.to_bits().to_be_bytes());
+        context.consume(text_color.g.to_bits().to_be_bytes());
+        context.consume(text_color.b.to_bits().to_be_bytes());
 
         Self {
-            hash: format!("{:x}", md5::compute(combined.as_bytes())),
+            hash: format!("{:x}", context.compute()),
         }
     }
 
@@ -46,12 +56,20 @@ impl CacheKey {
         doc_hash: &str,
         page_num: usize,
         page_text: &str,
-        translator: &str,
+        translator: &TranslatorCacheIdentity,
         source_lang: &Lang,
         target_lang: &Lang,
         text_color: TextColor,
     ) -> Self {
-        Self::new(doc_hash, page_num, page_text, translator, source_lang, target_lang, text_color)
+        Self::new(
+            doc_hash,
+            page_num,
+            page_text,
+            translator,
+            source_lang,
+            target_lang,
+            text_color,
+        )
     }
 
     pub fn as_str(&self) -> &str {
@@ -74,7 +92,16 @@ mod tests {
     const BLACK: TextColor = TextColor::new(0.0, 0.0, 0.0);
 
     fn key(doc: &str, page: usize, text: &str, translator: &str, src: &str, tgt: &str) -> CacheKey {
-        CacheKey::new(doc, page, text, translator, &Lang::new(src), &Lang::new(tgt), BLACK)
+        let identity = TranslatorCacheIdentity::new(translator, "https://example.test/v1", "model");
+        CacheKey::new(
+            doc,
+            page,
+            text,
+            &identity,
+            &Lang::new(src),
+            &Lang::new(tgt),
+            BLACK,
+        )
     }
 
     #[test]
@@ -86,50 +113,81 @@ mod tests {
 
     #[test]
     fn test_cache_key_differs_by_content() {
-        assert_ne!(key("doc", 0, "Hello", "Google", "fr", "en"),
-                   key("doc", 0, "World", "Google", "fr", "en"));
+        assert_ne!(
+            key("doc", 0, "Hello", "Google", "fr", "en"),
+            key("doc", 0, "World", "Google", "fr", "en")
+        );
     }
 
     #[test]
     fn test_cache_key_differs_by_page() {
-        assert_ne!(key("doc", 0, "Hello", "Google", "fr", "en"),
-                   key("doc", 1, "Hello", "Google", "fr", "en"));
+        assert_ne!(
+            key("doc", 0, "Hello", "Google", "fr", "en"),
+            key("doc", 1, "Hello", "Google", "fr", "en")
+        );
     }
 
     #[test]
     fn test_cache_key_differs_by_translator() {
-        assert_ne!(key("doc", 0, "Hello", "Google", "fr", "en"),
-                   key("doc", 0, "Hello", "OpenAI", "fr", "en"));
+        assert_ne!(
+            key("doc", 0, "Hello", "Google", "fr", "en"),
+            key("doc", 0, "Hello", "OpenAI", "fr", "en")
+        );
     }
 
     #[test]
     fn test_cache_key_differs_by_language() {
-        assert_ne!(key("doc", 0, "Hello", "Google", "fr", "en"),
-                   key("doc", 0, "Hello", "Google", "fr", "zh-CN"));
+        assert_ne!(
+            key("doc", 0, "Hello", "Google", "fr", "en"),
+            key("doc", 0, "Hello", "Google", "fr", "zh-CN")
+        );
     }
 
     #[test]
     fn test_cache_key_differs_by_source_language() {
-        assert_ne!(key("doc", 0, "Hello", "Google", "fr", "en"),
-                   key("doc", 0, "Hello", "Google", "auto", "en"));
+        assert_ne!(
+            key("doc", 0, "Hello", "Google", "fr", "en"),
+            key("doc", 0, "Hello", "Google", "auto", "en")
+        );
     }
 
     #[test]
     fn test_cache_key_differs_by_color() {
-        let k1 = CacheKey::new("doc", 0, "Hello", "Google", &Lang::new("fr"), &Lang::new("en"), BLACK);
-        let k2 = CacheKey::new("doc", 0, "Hello", "Google", &Lang::new("fr"), &Lang::new("en"), TextColor::new(0.8, 0.0, 0.0));
+        let identity = TranslatorCacheIdentity::new("OpenAI", "https://example.test/v1", "model");
+        let k1 = CacheKey::new(
+            "doc",
+            0,
+            "Hello",
+            &identity,
+            &Lang::new("fr"),
+            &Lang::new("en"),
+            BLACK,
+        );
+        let k2 = CacheKey::new(
+            "doc",
+            0,
+            "Hello",
+            &identity,
+            &Lang::new("fr"),
+            &Lang::new("en"),
+            TextColor::new(0.8, 0.0, 0.0),
+        );
         assert_ne!(k1, k2);
     }
 
     #[test]
     fn test_cache_key_same_inputs_same_key() {
-        assert_eq!(key("doc", 0, "Hello", "Google", "fr", "en"),
-                   key("doc", 0, "Hello", "Google", "fr", "en"));
+        assert_eq!(
+            key("doc", 0, "Hello", "Google", "fr", "en"),
+            key("doc", 0, "Hello", "Google", "fr", "en")
+        );
     }
 
     #[test]
-    fn test_cache_key_case_insensitive_translator() {
-        assert_eq!(key("doc", 0, "Hello", "Google", "fr", "en"),
-                   key("doc", 0, "Hello", "GOOGLE", "fr", "en"));
+    fn test_cache_key_distinguishes_translator_identity_case() {
+        assert_ne!(
+            key("doc", 0, "Hello", "Google", "fr", "en"),
+            key("doc", 0, "Hello", "GOOGLE", "fr", "en")
+        );
     }
 }

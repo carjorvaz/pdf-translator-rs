@@ -1,5 +1,5 @@
-# PDF Translator Configuration Example
-# Copy this to config.toml and customize as needed
+# PDF Translator CLI configuration example
+# Copy to the ignored ./config.toml, or pass this file with --config.
 
 # Source language (default: fr)
 source_lang = "fr"
@@ -15,12 +15,11 @@ r = 0.8
 g = 0.0
 b = 0.0
 
-# Translator backend configuration
-# Supports any OpenAI-compatible API (llama.cpp, Ollama, DeepSeek, OpenAI, etc.)
+# OpenAI-compatible translator settings.
+# Local llama.cpp defaults are shown; no API key is required for a local server.
+# For cloud use, keep credentials in OPENAI_API_KEY (or an ignored .env), not here.
 [translator]
-type = "open_ai_compatible"
 api_base = "http://localhost:8080/v1"
-# api_key = "sk-xxx"  # Optional for local servers
 model = "default_model"
 retry_count = 3
 retry_delay_ms = 1000
@@ -42,5 +41,3 @@ disk_enabled = true
 # PDF rendering scale factor (default: 2.0 for high DPI)
 render_scale = 2.0
 
-# Pages to load per batch in web UI
-pages_per_load = 2

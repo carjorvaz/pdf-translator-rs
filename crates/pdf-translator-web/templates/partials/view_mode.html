@@ -5,9 +5,27 @@
             <img id="original-img" class="page-image" src="/api/page/{{ session_id }}/{{ page }}" alt="Original page" decoding="async">
         </div>
         <div class="panel" id="translated-panel">
-            <div id="translated-content">
+            <div id="translated-content" aria-live="polite" aria-atomic="true">
                 {% if is_translated %}
-                <img class="page-image" src="/api/page/{{ session_id }}/{{ page }}?translated=1" alt="Translated" decoding="async">
+                <img class="page-image" src="/api/page/{{ session_id }}/{{ page }}?translated=1" alt="Translated page {{ page + 1 }}" decoding="async">
+                {% elif auto_translate %}
+                <div class="placeholder"
+                     hx-post="/api/translate/{{ session_id }}/{{ page + 1 }}"
+                     hx-trigger="load"
+                     hx-target="#translated-content"
+                     hx-swap="innerHTML"
+                     hx-indicator="#panel-loading"
+                     hx-disabled-elt="#translate-btn, #translate-all-btn"
+                     hx-sync="#app:abort">
+                    <span id="auto-translate-status">Translating...</span>
+                    <button id="auto-translate-retry" type="button" class="btn btn-primary" hidden
+                            hx-post="/api/translate/{{ session_id }}/{{ page + 1 }}"
+                            hx-target="#translated-content"
+                            hx-swap="innerHTML"
+                            hx-indicator="#panel-loading"
+                            hx-disabled-elt="this, #translate-btn, #translate-all-btn"
+                            hx-sync="#app:abort">Try again</button>
+                </div>
                 {% else %}
                 <div class="placeholder">Click "Translate" to see translation</div>
                 {% endif %}
@@ -23,13 +41,22 @@
 {# OOB update for view toggle buttons #}
 <div id="view-toggle" hx-swap-oob="true" class="view-toggle">
     <button type="button"
-            hx-post="/api/view-mode/{{ session_id }}/both"
+            hx-post="/api/view-mode/{{ session_id }}/{{ page + 1 }}/both"
             hx-target="#viewer"
             hx-swap="outerHTML"
+            hx-sync="#app:replace"
+            hx-push-url="/view/{{ session_id }}/{{ page + 1 }}?mode=both"
+            aria-pressed="{% if !view_translated_only %}true{% else %}false{% endif %}"
             class="{% if !view_translated_only %}active{% endif %}">Both</button>
     <button type="button"
-            hx-post="/api/view-mode/{{ session_id }}/translated"
+            hx-post="/api/view-mode/{{ session_id }}/{{ page + 1 }}/translated"
             hx-target="#viewer"
             hx-swap="outerHTML"
+            hx-sync="#app:replace"
+            hx-push-url="/view/{{ session_id }}/{{ page + 1 }}?mode=translated"
+            aria-pressed="{% if view_translated_only %}true{% else %}false{% endif %}"
             class="{% if view_translated_only %}active{% endif %}">Translated</button>
 </div>
+
+{# Mode changes also replace pagination URLs so subsequent navigation stays in this tab's mode. #}
+{% include "partials/pagination.html" %}

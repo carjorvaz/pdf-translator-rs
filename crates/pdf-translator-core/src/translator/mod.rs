@@ -1,8 +1,8 @@
-mod traits;
 mod openai;
+mod traits;
 
-pub use traits::{Translator, TranslatorInfo};
 pub use openai::OpenAiTranslator;
+pub use traits::{Translator, TranslatorInfo};
 
 use crate::config::TranslatorConfig;
 use crate::error::Result;

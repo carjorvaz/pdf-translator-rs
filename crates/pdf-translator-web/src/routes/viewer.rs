@@ -4,16 +4,89 @@ use askama::Template;
 use axum::{
     body::Body,
     extract::{Path, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::Response,
 };
-use pdf_translator_core::{render_page, render_page_webp, PdfDocument};
+use pdf_translator_core::{PdfDocument, render_page, render_page_webp};
 use std::sync::Arc;
 
-use super::{prefetch_links, PageImageQuery, PageViewQuery};
-use crate::helpers::{validate_page, OptionExt, ResultExt, RouteResult};
+use super::{PageImageQuery, PageViewQuery, page_index, prefetch_links};
+use crate::helpers::{OptionExt, ResultExt, RouteResult, validate_page};
 use crate::state::{AppState, ViewMode};
-use crate::templates::{ViewerFragmentTemplate, ViewModeTemplate};
+use crate::templates::{ViewModeTemplate, ViewerFragmentTemplate};
+
+const IMAGE_VARY: &str = "Accept, DPR, Sec-CH-DPR";
+
+fn requested_view_mode(mode: Option<&str>, default: ViewMode) -> RouteResult<ViewMode> {
+    match mode {
+        Some("both") => Ok(ViewMode::Both),
+        Some("translated") => Ok(ViewMode::TranslatedOnly),
+        Some(_) => Err((StatusCode::BAD_REQUEST, "Invalid view mode".to_string())),
+        None => Ok(default),
+    }
+}
+
+fn accepts_webp(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(header::ACCEPT)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|range| {
+            let mut parts = range.split(';');
+            let is_webp = parts
+                .next()
+                .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("image/webp"));
+            if !is_webp {
+                return false;
+            }
+
+            parts
+                .filter_map(|parameter| parameter.split_once('='))
+                .find(|(name, _)| name.trim().eq_ignore_ascii_case("q"))
+                .is_none_or(|(_, value)| {
+                    value
+                        .trim()
+                        .parse::<f32>()
+                        .is_ok_and(|quality| quality > 0.0)
+                })
+        })
+}
+
+fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
+    headers
+        .get_all(header::IF_NONE_MATCH)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|candidate| {
+            let candidate = candidate.trim();
+            candidate == "*" || candidate.strip_prefix("W/").unwrap_or(candidate) == etag
+        })
+}
+
+fn image_response(status: StatusCode) -> axum::http::response::Builder {
+    Response::builder()
+        .status(status)
+        .header("Accept-CH", "DPR")
+        .header(header::VARY, IMAGE_VARY)
+}
+
+fn translated_not_ready() -> RouteResult<Response> {
+    image_response(StatusCode::NOT_FOUND)
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(Body::from("Translated page not ready"))
+        .or_internal_error()
+}
+
+fn translated_changed() -> RouteResult<Response> {
+    image_response(StatusCode::CONFLICT)
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(Body::from("Translated page changed; retry request"))
+        .or_internal_error()
+}
 
 /// Get page image as PNG or WebP (based on Accept header).
 ///
@@ -36,57 +109,67 @@ pub async fn get_page_image(
         .or_not_found("Session not found")?;
     validate_page(page, page_count)?;
 
-    // Check if browser supports WebP
-    let use_webp = headers
-        .get(header::ACCEPT)
-        .and_then(|h| h.to_str().ok())
-        .is_some_and(|s| s.contains("image/webp"));
+    let use_webp = accepts_webp(&headers);
     let content_type = if use_webp { "image/webp" } else { "image/png" };
+    let format_tag = if use_webp { "webp" } else { "png" };
 
-    // DPR-aware rendering via Client Hints (integer scaling only: 1x or 2x)
+    // DPR-aware rendering via Client Hints (integer scaling only: 1x or 2x).
     let scale = headers
         .get("dpr")
         .or_else(|| headers.get("sec-ch-dpr"))
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.parse::<f32>().ok())
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<f32>().ok())
         .map_or(2.0, |dpr| if dpr < 1.5 { 1.0 } else { 2.0 });
 
-    let wants_translated = query.translated.is_some();
+    if query.translated.is_some() {
+        // A translation can be replaced while its immutable snapshot is being
+        // rendered. Retry once against the new version rather than publishing
+        // pixels whose ETag no longer describes the current page.
+        for _ in 0..2 {
+            let snapshot = session
+                .with_session(|s| s.page_store.page_snapshot(page))
+                .await
+                .or_not_found("Session not found")?;
+            let Some(snapshot) = snapshot else {
+                return translated_not_ready();
+            };
 
-    // For translated pages, check ETag for cache validation
-    if wants_translated {
-        // Get metadata inside lock (fast)
-        let (has_page, version, path) = session
-            .with_session(|s| {
-                (
-                    s.page_store.has_page(page),
-                    s.page_store.version(page),
-                    s.page_store.page_path(page),
-                )
-            })
-            .await
-            .or_not_found("Session not found")?;
-
-        if has_page {
-            // Include format and scale in ETag so variants are cached separately
-            let format_tag = if use_webp { "webp" } else { "png" };
-            let etag = format!("\"{session_id}-{page}-{version}-{format_tag}-{scale}\"");
-
-            // Check If-None-Match header for 304 response
-            if let Some(if_none_match) = headers.get(header::IF_NONE_MATCH)
-                && if_none_match.to_str().ok() == Some(etag.as_str())
-            {
-                return Response::builder()
-                    .status(StatusCode::NOT_MODIFIED)
-                    .body(Body::empty())
-                    .or_internal_error();
+            let etag = format!(
+                "\"{session_id}-{page}-{}-{format_tag}-{scale}\"",
+                snapshot.version()
+            );
+            if if_none_match(&headers, &etag) {
+                let unchanged = session
+                    .with_session(|s| {
+                        s.page_store
+                            .page_snapshot(page)
+                            .is_some_and(|current| Arc::ptr_eq(&current, &snapshot))
+                    })
+                    .await
+                    .or_not_found("Session not found")?;
+                if unchanged {
+                    return image_response(StatusCode::NOT_MODIFIED)
+                        .header(header::ETAG, etag)
+                        .header(
+                            header::CACHE_CONTROL,
+                            "private, max-age=3600, must-revalidate",
+                        )
+                        .body(Body::empty())
+                        .or_internal_error();
+                }
+                continue;
             }
 
-            // Load translated PDF from disk (async, outside lock)
-            let pdf_bytes = tokio::fs::read(&path).await.or_internal_error()?;
+            let pdf_bytes = match tokio::fs::read(snapshot.path()).await {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return translated_not_ready();
+                }
+                Err(error) => return Err((StatusCode::INTERNAL_SERVER_ERROR, error.to_string())),
+            };
 
-            // Parse and render in blocking task to avoid blocking async runtime
-            // Translated PDFs are single-page (via keep_single_page), so always render page 0
+            // Translated PDFs contain one page. Parsing and rendering remain
+            // off the async executor because both are CPU-bound.
             let image_data = tokio::task::spawn_blocking(move || {
                 let doc = PdfDocument::from_bytes(pdf_bytes)?;
                 if use_webp {
@@ -96,53 +179,54 @@ pub async fn get_page_image(
                 }
             })
             .await
-            .map_err(|e| {
+            .map_err(|error| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Render task panicked: {e}"),
+                    format!("Render task panicked: {error}"),
                 )
             })?
             .or_internal_error()?;
 
-            return Response::builder()
-                .status(StatusCode::OK)
+            let unchanged = session
+                .with_session(|s| {
+                    s.page_store
+                        .page_snapshot(page)
+                        .is_some_and(|current| Arc::ptr_eq(&current, &snapshot))
+                })
+                .await
+                .or_not_found("Session not found")?;
+            if !unchanged {
+                continue;
+            }
+
+            return image_response(StatusCode::OK)
                 .header(header::CONTENT_TYPE, content_type)
                 .header(header::ETAG, etag)
                 .header(
                     header::CACHE_CONTROL,
                     "private, max-age=3600, must-revalidate",
                 )
-                .header("Accept-CH", "DPR")
-                .header(header::VARY, "DPR")
                 .body(Body::from(image_data))
                 .or_internal_error();
         }
 
-        // Fall through to render original if no translation
+        return translated_changed();
     }
 
-    // Render original page - can be cached aggressively (never changes within session)
-    // Include format and scale in ETag so variants are cached separately
-    let format_tag = if use_webp { "webp" } else { "png" };
+    // Original pages are immutable for the lifetime of a session.
     let etag = format!("\"orig-{session_id}-{page}-{format_tag}-{scale}\"");
-
-    // Check If-None-Match for 304 response
-    if let Some(if_none_match) = headers.get(header::IF_NONE_MATCH)
-        && if_none_match.to_str().ok() == Some(etag.as_str())
-    {
-        return Response::builder()
-            .status(StatusCode::NOT_MODIFIED)
+    if if_none_match(&headers, &etag) {
+        return image_response(StatusCode::NOT_MODIFIED)
+            .header(header::ETAG, etag)
+            .header(header::CACHE_CONTROL, "private, max-age=3600, immutable")
             .body(Body::empty())
             .or_internal_error();
     }
 
-    // Clone document inside lock (O(1) - only clones Arc pointer)
     let doc = session
         .with_session(|s| s.document.clone())
         .await
         .or_not_found("Session not found")?;
-
-    // Render in blocking task to avoid blocking async runtime
     let image_data = tokio::task::spawn_blocking(move || {
         if use_webp {
             render_page_webp(&doc, page, scale)
@@ -151,21 +235,18 @@ pub async fn get_page_image(
         }
     })
     .await
-    .map_err(|e| {
+    .map_err(|error| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Render task panicked: {e}"),
+            format!("Render task panicked: {error}"),
         )
     })?
     .or_internal_error()?;
 
-    Response::builder()
-        .status(StatusCode::OK)
+    image_response(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
         .header(header::ETAG, etag)
         .header(header::CACHE_CONTROL, "private, max-age=3600, immutable")
-        .header("Accept-CH", "DPR")
-        .header(header::VARY, "DPR")
         .body(Body::from(image_data))
         .or_internal_error()
 }
@@ -178,32 +259,31 @@ pub async fn get_page_image(
 pub async fn get_page_view(
     State(state): State<Arc<AppState>>,
     Path((session_id, url_page)): Path<(String, usize)>,
+    Query(query): Query<PageViewQuery>,
 ) -> RouteResult<Response> {
-    // Convert 1-based URL page to 0-based internal page
-    let page = url_page.saturating_sub(1);
+    let page = page_index(url_page)?;
 
     let session = state
         .get_session(&session_id)
         .await
         .or_not_found("Session not found")?;
 
-    // Update current page in session
-    session.with_session_mut(|s| s.current_page = page).await;
-
-    let (is_translated, has_any_translations, page_count, view_mode, auto_translate) = session
-        .with_session(|s| {
-            (
-                s.page_store.has_page(page),
-                !s.page_store.is_empty(),
-                s.document.page_count(),
-                s.settings.view_mode,
-                s.settings.auto_translate,
-            )
-        })
-        .await
-        .or_not_found("Session not found")?;
+    let (is_translated, has_any_translations, page_count, default_view_mode, auto_translate) =
+        session
+            .with_session(|s| {
+                (
+                    s.page_store.has_page(page),
+                    !s.page_store.is_empty(),
+                    s.document.page_count(),
+                    s.settings.view_mode,
+                    s.settings.auto_translate,
+                )
+            })
+            .await
+            .or_not_found("Session not found")?;
 
     validate_page(page, page_count)?;
+    let view_mode = requested_view_mode(query.mode.as_deref(), default_view_mode)?;
 
     let template = ViewerFragmentTemplate::new(
         session_id.clone(),
@@ -238,32 +318,30 @@ pub async fn get_page_view_query(
     Path(session_id): Path<String>,
     Query(query): Query<PageViewQuery>,
 ) -> RouteResult<Response> {
-    // Default to page 1 if not specified, convert to 0-based
     let url_page = query.page.unwrap_or(1);
-    let page = url_page.saturating_sub(1);
+    let page = page_index(url_page)?;
 
     let session = state
         .get_session(&session_id)
         .await
         .or_not_found("Session not found")?;
 
-    // Update current page in session
-    session.with_session_mut(|s| s.current_page = page).await;
-
-    let (is_translated, has_any_translations, page_count, view_mode, auto_translate) = session
-        .with_session(|s| {
-            (
-                s.page_store.has_page(page),
-                !s.page_store.is_empty(),
-                s.document.page_count(),
-                s.settings.view_mode,
-                s.settings.auto_translate,
-            )
-        })
-        .await
-        .or_not_found("Session not found")?;
+    let (is_translated, has_any_translations, page_count, default_view_mode, auto_translate) =
+        session
+            .with_session(|s| {
+                (
+                    s.page_store.has_page(page),
+                    !s.page_store.is_empty(),
+                    s.document.page_count(),
+                    s.settings.view_mode,
+                    s.settings.auto_translate,
+                )
+            })
+            .await
+            .or_not_found("Session not found")?;
 
     validate_page(page, page_count)?;
+    let view_mode = requested_view_mode(query.mode.as_deref(), default_view_mode)?;
 
     let template = ViewerFragmentTemplate::new(
         session_id.clone(),
@@ -276,7 +354,14 @@ pub async fn get_page_view_query(
     );
 
     let html = template.render().or_internal_error()?;
-    let push_url = format!("/view/{session_id}/{url_page}");
+    let push_url = format!(
+        "/view/{session_id}/{url_page}?mode={}",
+        if view_mode.is_translated_only() {
+            "translated"
+        } else {
+            "both"
+        }
+    );
 
     let mut builder = Response::builder()
         .status(StatusCode::OK)
@@ -297,32 +382,106 @@ pub async fn get_page_view_query(
 /// This keeps view state server-controlled instead of client-side JS.
 pub async fn set_view_mode(
     State(state): State<Arc<AppState>>,
-    Path((session_id, mode)): Path<(String, String)>,
+    Path((session_id, url_page, mode)): Path<(String, usize, String)>,
 ) -> RouteResult<ViewModeTemplate> {
-    let session_ref = state
-        .get_session(&session_id)
-        .await
-        .or_not_found("Session not found")?;
-
-    // Parse mode and update session
+    let page = page_index(url_page)?;
     let new_mode = match mode.as_str() {
         "both" => ViewMode::Both,
         "translated" => ViewMode::TranslatedOnly,
         _ => return Err((StatusCode::BAD_REQUEST, "Invalid view mode".to_string())),
     };
 
-    let (page, is_translated) = session_ref
-        .with_session_mut(|s| {
-            s.settings.view_mode = new_mode;
-            (s.current_page, s.page_store.has_page(s.current_page))
+    let session = state
+        .get_session(&session_id)
+        .await
+        .or_not_found("Session not found")?;
+    let (page_count, is_translated, auto_translate) = session
+        .with_session(|s| {
+            (
+                s.document.page_count(),
+                s.page_store.has_page(page),
+                s.settings.auto_translate,
+            )
         })
         .await
         .or_not_found("Session not found")?;
+    validate_page(page, page_count)?;
 
+    // View mode is request-local: one browser tab cannot change another tab's
+    // presentation. The explicit page keeps this response independent of any
+    // navigation request racing in the same session.
     Ok(ViewModeTemplate::new(
         session_id,
         page,
+        page_count,
         is_translated,
+        auto_translate,
         new_mode,
     ))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn view_mode_query_is_strict_and_preserves_default() {
+        assert_eq!(
+            requested_view_mode(None, ViewMode::TranslatedOnly).unwrap(),
+            ViewMode::TranslatedOnly
+        );
+        assert_eq!(
+            requested_view_mode(Some("both"), ViewMode::TranslatedOnly).unwrap(),
+            ViewMode::Both
+        );
+        assert_eq!(
+            requested_view_mode(Some("translated"), ViewMode::Both).unwrap(),
+            ViewMode::TranslatedOnly
+        );
+        assert_eq!(
+            requested_view_mode(Some("Translated"), ViewMode::Both)
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn webp_negotiation_rejects_zero_quality() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("image/avif, image/webp;q=0, image/png;q=1"),
+        );
+        assert!(!accepts_webp(&headers));
+
+        headers.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("image/png;q=0.8, image/webp;q=0.5"),
+        );
+        assert!(accepts_webp(&headers));
+    }
+
+    #[test]
+    fn etag_matching_handles_lists_weak_tags_and_wildcards() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::IF_NONE_MATCH,
+            HeaderValue::from_static("\"old\", W/\"current\""),
+        );
+        assert!(if_none_match(&headers, "\"current\""));
+        assert!(!if_none_match(&headers, "\"other\""));
+
+        headers.insert(header::IF_NONE_MATCH, HeaderValue::from_static("*"));
+        assert!(if_none_match(&headers, "\"anything\""));
+    }
+
+    #[test]
+    fn public_page_numbers_never_underflow() {
+        assert_eq!(page_index(1).unwrap(), 0);
+        assert_eq!(page_index(2).unwrap(), 1);
+        assert_eq!(page_index(0).unwrap_err().0, StatusCode::BAD_REQUEST);
+    }
 }

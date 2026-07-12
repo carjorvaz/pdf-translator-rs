@@ -1,74 +1,94 @@
 //! Settings routes - session settings management.
 
-use axum::extract::{Path, State, Form};
+use axum::extract::{Form, Path, State};
 use axum::http::StatusCode;
-use pdf_translator_core::{Lang, TextColor};
+use pdf_translator_core::{Lang, TextColor, source_languages, target_languages};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use super::SettingsForm;
 use crate::helpers::{OptionExt, RouteResult};
 use crate::state::AppState;
 use crate::templates::{AutoTranslateToggleTemplate, SettingsClearedTemplate};
 
-/// Update session settings - returns cleared panel HTML fragment.
-///
-/// HTMX: Replaces `#translated-content`, includes OOB swaps for flag/swatch indicators.
-/// This keeps all UI state server-controlled (hypermedia-style).
-/// Rejects changes during active batch translation to prevent race conditions.
 pub async fn update_settings(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
     Form(update): Form<SettingsForm>,
 ) -> RouteResult<SettingsClearedTemplate> {
+    let source = match update.source_lang {
+        Some(source)
+            if source_languages()
+                .iter()
+                .any(|language| language.code == source) =>
+        {
+            Some(Lang::new(source))
+        }
+        Some(_) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid source language".to_string(),
+            ));
+        }
+        None => None,
+    };
+    let target = match update.target_lang {
+        Some(target)
+            if target_languages()
+                .iter()
+                .any(|language| language.code == target) =>
+        {
+            Some(Lang::new(target))
+        }
+        Some(_) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid target language".to_string(),
+            ));
+        }
+        None => None,
+    };
+    let color = match update.text_color {
+        Some(color) => Some(
+            TextColor::from_name(&color)
+                .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid text color".to_string()))?,
+        ),
+        None => None,
+    };
+
     let session_ref = state
         .get_session(&session_id)
         .await
         .or_not_found("Session not found")?;
-
-    // Reject settings changes during active batch translation
-    let is_translating = session_ref
-        .with_session(|s| {
-            s.translate_job
-                .as_ref()
-                .is_some_and(|job| !job.done.load(Ordering::SeqCst))
-        })
-        .await
-        .unwrap_or(false);
-
-    if is_translating {
-        return Err((
-            StatusCode::CONFLICT,
-            "Cannot change settings during batch translation".to_string(),
-        ));
-    }
-
-    // Update settings
     session_ref
-        .with_session_mut(|s| {
-            if let Some(ref source) = update.source_lang {
-                s.settings.source_lang = Lang::new(source.clone());
+        .with_session_mut(|session| {
+            let changed = source
+                .as_ref()
+                .is_some_and(|value| value != &session.settings.source_lang)
+                || target
+                    .as_ref()
+                    .is_some_and(|value| value != &session.settings.target_lang)
+                || color.is_some_and(|value| value != session.settings.text_color);
+            if !changed {
+                return;
             }
-            if let Some(ref target) = update.target_lang {
-                s.settings.target_lang = Lang::new(target.clone());
+            if let Some(value) = source {
+                session.settings.source_lang = value;
             }
-            if let Some(ref color) = update.text_color
-                && let Some(c) = TextColor::from_name(color)
-            {
-                s.settings.text_color = c;
+            if let Some(value) = target {
+                session.settings.target_lang = value;
             }
-            // Clear translated pages when settings change
-            s.page_store.clear();
+            if let Some(value) = color {
+                session.settings.text_color = value;
+            }
+            // One lock transition invalidates metadata, claims, and any old-generation job.
+            session.invalidate_translations();
         })
         .await
         .or_not_found("Session not found")?;
 
-    Ok(SettingsClearedTemplate::default())
+    Ok(SettingsClearedTemplate)
 }
 
-/// Toggle auto-translate setting - returns OOB checkbox update.
-///
-/// Unlike language/color settings, this doesn't clear translations.
 pub async fn toggle_auto_translate(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
@@ -77,15 +97,13 @@ pub async fn toggle_auto_translate(
         .get_session(&session_id)
         .await
         .or_not_found("Session not found")?;
-
     let new_value = session_ref
-        .with_session_mut(|s| {
-            s.settings.auto_translate = !s.settings.auto_translate;
-            s.settings.auto_translate
+        .with_session_mut(|session| {
+            session.settings.auto_translate = !session.settings.auto_translate;
+            session.settings.auto_translate
         })
         .await
         .or_not_found("Session not found")?;
-
     Ok(AutoTranslateToggleTemplate {
         session_id,
         auto_translate: new_value,

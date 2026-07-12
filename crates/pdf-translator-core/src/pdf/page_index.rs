@@ -15,12 +15,13 @@ use crate::error::Error;
 pub struct PageIndex(i32);
 
 impl PageIndex {
-    /// Create a new PageIndex from an i32 value.
+    /// Create a page index from a nonnegative value.
     ///
-    /// This should only be used when you already have a valid i32 page index.
+    /// Larger indices must use [`TryFrom<usize>`], which rejects values that
+    /// cannot be incremented safely for one-based PDF page APIs.
     #[must_use]
-    pub const fn new(index: i32) -> Self {
-        Self(index)
+    pub const fn new(index: u16) -> Self {
+        Self(index as i32)
     }
 
     /// Get the underlying i32 value.
@@ -30,19 +31,10 @@ impl PageIndex {
     }
 
     /// Get the index as usize for Rust collections.
-    ///
-    /// Returns 0 if somehow the index is negative, though this should never happen
-    /// if the PageIndex was created through `TryFrom<usize>` or `try_from_page_num`.
     #[must_use]
-    #[allow(clippy::cast_sign_loss)] // Safe: we check for negative values
+    #[allow(clippy::cast_sign_loss)] // Safe: every constructor enforces nonnegative values
     pub const fn as_usize(self) -> usize {
-        // PageIndex is always created from non-negative values, but we handle
-        // the impossible case gracefully rather than panicking
-        if self.0 < 0 {
-            0
-        } else {
-            self.0 as usize
-        }
+        self.0 as usize
     }
 
     /// Get the 1-indexed page number for lopdf (which uses 1-based indexing).
@@ -50,8 +42,7 @@ impl PageIndex {
     /// Returns the page number as u32, suitable for use with lopdf's page APIs.
     #[must_use]
     pub const fn as_lopdf_page_number(self) -> u32 {
-        // Safe because PageIndex is always non-negative and adding 1 won't overflow
-        // for any realistic page count. Use cast_unsigned for explicitness.
+        // Every constructor rejects i32::MAX, so the addition cannot overflow.
         (self.0 + 1).cast_unsigned()
     }
 
@@ -67,10 +58,13 @@ impl PageIndex {
             });
         }
 
-        let index = i32::try_from(page_num).map_err(|_| Error::PdfInvalidPage {
-            page: page_num,
-            total: total_pages,
-        })?;
+        let index = i32::try_from(page_num)
+            .ok()
+            .filter(|&index| index < i32::MAX)
+            .ok_or(Error::PdfInvalidPage {
+                page: page_num,
+                total: total_pages,
+            })?;
 
         Ok(Self(index))
     }
@@ -85,10 +79,13 @@ impl TryFrom<usize> for PageIndex {
     /// For production use, prefer `try_from_page_num` which also validates
     /// against the document's page count.
     fn try_from(value: usize) -> Result<Self, Self::Error> {
-        let index = i32::try_from(value).map_err(|_| Error::PdfInvalidPage {
-            page: value,
-            total: 0, // Unknown total when using raw conversion
-        })?;
+        let index = i32::try_from(value)
+            .ok()
+            .filter(|&index| index < i32::MAX)
+            .ok_or(Error::PdfInvalidPage {
+                page: value,
+                total: 0, // Unknown total when using raw conversion
+            })?;
         Ok(Self(index))
     }
 }

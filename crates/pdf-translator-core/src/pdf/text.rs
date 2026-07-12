@@ -1,8 +1,8 @@
 use mupdf::TextPageOptions;
 
-use crate::error::{Error, Result};
 use super::document::PdfDocument;
 use super::page_index::PageIndex;
+use crate::error::{Error, Result};
 
 /// A text block extracted from a PDF page with bounding box
 #[derive(Debug, Clone)]
@@ -93,22 +93,22 @@ impl<'a> TextExtractor<'a> {
         let page_index = PageIndex::try_from_page_num(page_num, self.doc.page_count())?;
 
         let doc = self.doc.open_document()?;
-        let page = doc.load_page(page_index.into()).map_err(|e| {
-            Error::PdfTextExtraction {
+        let page = doc
+            .load_page(page_index.into())
+            .map_err(|e| Error::PdfTextExtraction {
                 page: page_num,
                 reason: format!("Failed to load page: {e}"),
-            }
-        })?;
+            })?;
 
         // Get text page (mupdf doesn't have a dehyphenate option)
         let flags = TextPageOptions::empty();
 
-        let text_page = page.to_text_page(flags).map_err(|e| {
-            Error::PdfTextExtraction {
+        let text_page = page
+            .to_text_page(flags)
+            .map_err(|e| Error::PdfTextExtraction {
                 page: page_num,
                 reason: format!("Failed to get text page: {e}"),
-            }
-        })?;
+            })?;
 
         let mut blocks = Vec::new();
 
@@ -175,7 +175,11 @@ impl<'a> TextExtractor<'a> {
 
             // Filter out tiny fragments (likely page numbers, artifacts, etc.)
             // Use min_length if set, otherwise default to 3 chars minimum
-            let min_len = if self.min_length > 0 { self.min_length } else { 3 };
+            let min_len = if self.min_length > 0 {
+                self.min_length
+            } else {
+                3
+            };
             if text.is_empty() || text.len() < min_len {
                 continue;
             }
@@ -235,9 +239,9 @@ impl<'a> TextExtractor<'a> {
 
         for block in blocks {
             // Check if this block overlaps significantly with any already-kept block
-            let dominated = result.iter().any(|kept| {
-                Self::bboxes_overlap_significantly(&block.bbox, &kept.bbox)
-            });
+            let dominated = result
+                .iter()
+                .any(|kept| Self::bboxes_overlap_significantly(&block.bbox, &kept.bbox));
 
             if !dominated {
                 result.push(block);
@@ -280,7 +284,12 @@ impl<'a> TextExtractor<'a> {
 
         // Sort blocks by vertical position (top to bottom in page coordinates)
         // In MuPDF coords, smaller y0 = higher on page
-        blocks.sort_by(|a, b| a.bbox.y0.partial_cmp(&b.bbox.y0).unwrap_or(std::cmp::Ordering::Equal));
+        blocks.sort_by(|a, b| {
+            a.bbox
+                .y0
+                .partial_cmp(&b.bbox.y0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let mut merged: Vec<TextBlock> = Vec::with_capacity(blocks.len());
         let mut i = 0;
@@ -298,14 +307,12 @@ impl<'a> TextExtractor<'a> {
 
                 // Check if next block looks like a word fragment (starts lowercase, relatively short)
                 let next_trimmed = next.text.trim_start();
-                let next_starts_lower = next_trimmed.chars().next()
-                    .map(|c| c.is_lowercase())
-                    .unwrap_or(false);
+                let next_starts_lower = next_trimmed.chars().next().is_some_and(char::is_lowercase);
                 let next_is_fragment = next_trimmed.len() < 20 && !next_trimmed.contains(' ');
 
                 // Calculate vertical gap - use absolute value to handle overlapping blocks
                 let vertical_gap = (next.bbox.y0 - current.bbox.y1).abs();
-                let avg_height = (current.bbox.height() + next.bbox.height()) / 2.0;
+                let avg_height = f32::midpoint(current.bbox.height(), next.bbox.height());
                 // Be more generous with vertical distance - allow up to 3x line height
                 let close_vertically = vertical_gap < avg_height * 3.0;
 
@@ -351,21 +358,21 @@ impl<'a> TextExtractor<'a> {
         let page_index = PageIndex::try_from_page_num(page_num, self.doc.page_count())?;
 
         let doc = self.doc.open_document()?;
-        let page = doc.load_page(page_index.into()).map_err(|e| {
-            Error::PdfTextExtraction {
+        let page = doc
+            .load_page(page_index.into())
+            .map_err(|e| Error::PdfTextExtraction {
                 page: page_num,
                 reason: format!("Failed to load page: {e}"),
-            }
-        })?;
+            })?;
 
         let flags = TextPageOptions::empty();
 
-        let text_page = page.to_text_page(flags).map_err(|e| {
-            Error::PdfTextExtraction {
+        let text_page = page
+            .to_text_page(flags)
+            .map_err(|e| Error::PdfTextExtraction {
                 page: page_num,
                 reason: format!("Failed to get text page: {e}"),
-            }
-        })?;
+            })?;
 
         // Collect all text
         let mut all_text = String::new();
@@ -383,4 +390,3 @@ impl<'a> TextExtractor<'a> {
         Ok(all_text)
     }
 }
-

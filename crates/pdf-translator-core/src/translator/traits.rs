@@ -1,6 +1,6 @@
-use async_trait::async_trait;
-use crate::config::Lang;
+use crate::config::{Lang, TranslatorCacheIdentity};
 use crate::error::Result;
+use async_trait::async_trait;
 
 /// Information about a translator backend
 #[derive(Debug, Clone)]
@@ -24,13 +24,11 @@ pub trait Translator: Send + Sync {
         self.info().name
     }
 
+    /// Get the non-secret identity used to partition translation cache entries.
+    fn cache_identity(&self) -> TranslatorCacheIdentity;
+
     /// Translate text from source language to target language
-    async fn translate(
-        &self,
-        text: &str,
-        source: &Lang,
-        target: &Lang,
-    ) -> Result<String>;
+    async fn translate(&self, text: &str, source: &Lang, target: &Lang) -> Result<String>;
 
     /// Check if the translator is available (e.g., API key configured)
     fn is_available(&self) -> bool {

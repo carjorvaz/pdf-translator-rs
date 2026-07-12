@@ -19,6 +19,9 @@ pub use translate::{prefetch_page, translate_page};
 pub use upload::upload_pdf;
 pub use viewer::{get_page_image, get_page_view, get_page_view_query, set_view_mode};
 
+use crate::helpers::RouteResult;
+use axum::http::StatusCode;
+
 use serde::Deserialize as SerdeDeserialize;
 
 /// Query params for page image.
@@ -28,12 +31,23 @@ pub struct PageImageQuery {
     pub translated: Option<String>,
 }
 
-/// Query params for page view (allows page input to use HTMX directly).
+/// Query params for page view and navigation.
 #[derive(SerdeDeserialize, Default)]
 pub struct PageViewQuery {
     /// 1-based page number from the input field
     #[serde(default)]
     pub page: Option<usize>,
+    /// Request-local presentation mode.
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+/// Query params for a full viewer page.
+#[derive(SerdeDeserialize, Default)]
+pub struct ViewPageQuery {
+    /// Request-local presentation mode.
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 /// Form data for translation.
@@ -50,6 +64,16 @@ pub struct SettingsForm {
     pub source_lang: Option<String>,
     pub target_lang: Option<String>,
     pub text_color: Option<String>,
+}
+
+/// Convert a public 1-based page number to the internal 0-based index.
+fn page_index(url_page: usize) -> RouteResult<usize> {
+    url_page.checked_sub(1).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Page number must be at least 1".to_string(),
+        )
+    })
 }
 
 const PREFETCH_BACKWARD: usize = 1;

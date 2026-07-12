@@ -37,13 +37,11 @@ pub fn clear_translation_cache() -> Result<usize, String> {
         return Ok(0);
     }
 
-    // Open the sled database and clear it
-    let db = sled::open(&cache_path)
-        .map_err(|e| format!("Failed to open cache: {e}"))?;
-
-    let count = db.len();
-    db.clear().map_err(|e| format!("Failed to clear cache: {e}"))?;
-    db.flush().map_err(|e| format!("Failed to flush cache: {e}"))?;
-
+    let cache = crate::cache::DiskCache::new(&cache_path)
+        .map_err(|error| format!("Failed to open cache: {error}"))?;
+    let count = cache.len();
+    cache
+        .clear()
+        .map_err(|error| format!("Failed to clear cache: {error}"))?;
     Ok(count)
 }

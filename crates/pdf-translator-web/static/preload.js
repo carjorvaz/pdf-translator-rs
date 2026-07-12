@@ -267,3 +267,144 @@
     return node instanceof HTMLSelectElement;
   }
 })()
+
+/* Application upload and auto-translation UI event handling. */
+;(function() {
+  function setUploadProgress(form, percent, text) {
+    const bar = form.querySelector('#upload-progress-bar')
+    const fill = form.querySelector('#upload-progress-fill')
+    const label = form.querySelector('#upload-progress-text')
+    fill.style.width = `${percent}%`
+    bar.setAttribute('aria-valuenow', String(percent))
+    bar.setAttribute('aria-valuetext', text)
+    label.textContent = text
+  }
+
+  function uploadForm(event) {
+    const element = event.detail && event.detail.elt
+    return element instanceof Element ? element.closest('form.upload-area') : null
+  }
+
+  function beginUpload(form) {
+    form.classList.add('uploading')
+    form.classList.remove('processing')
+    form.setAttribute('aria-busy', 'true')
+    const error = form.querySelector('#upload-error')
+    error.textContent = ''
+    error.hidden = true
+    setUploadProgress(form, 0, 'Starting upload')
+  }
+
+  function finishUpload(form) {
+    form.classList.add('processing')
+    setUploadProgress(form, 100, 'Upload complete. Processing PDF...')
+  }
+
+  function failUpload(form) {
+    form.classList.remove('uploading', 'processing')
+    form.removeAttribute('aria-busy')
+    const input = form.querySelector('#file-input')
+    input.disabled = false
+    input.value = ''
+    setUploadProgress(form, 0, 'Upload failed')
+    const error = form.querySelector('#upload-error')
+    error.textContent = 'Upload failed. Choose a PDF and try again.'
+    error.hidden = false
+  }
+
+  function autoTranslateContainer(event) {
+    const element = event.detail && event.detail.elt
+    if (!(element instanceof Element)) return null
+    const container = element.closest('.placeholder')
+    return container && container.querySelector('#auto-translate-status') ? container : null
+  }
+
+  function beginAutoTranslate(container) {
+    container.querySelector('#auto-translate-status').textContent = 'Translating...'
+    container.querySelector('#auto-translate-retry').hidden = true
+  }
+
+  function failAutoTranslate(container) {
+    container.querySelector('#auto-translate-status').textContent =
+      'Translation failed. Select Try again to retry.'
+    container.querySelector('#auto-translate-retry').hidden = false
+  }
+
+  function bindUpload(root) {
+    const form = root.matches && root.matches('form.upload-area')
+      ? root
+      : root.querySelector && root.querySelector('form.upload-area')
+    if (!form || form.dataset.uploadInitialized === 'true') return
+    const input = form.querySelector('#file-input')
+    if (!input) return
+    form.dataset.uploadInitialized = 'true'
+
+    input.addEventListener('change', function() {
+      if (input.files.length > 0) form.requestSubmit()
+    })
+    for (const eventName of ['dragenter', 'dragover']) {
+      form.addEventListener(eventName, function(event) {
+        event.preventDefault()
+        form.classList.add('dragover')
+      })
+    }
+    form.addEventListener('dragleave', function() {
+      form.classList.remove('dragover')
+    })
+    form.addEventListener('drop', function(event) {
+      event.preventDefault()
+      form.classList.remove('dragover')
+      if (event.dataTransfer.files.length === 0) return
+      input.files = event.dataTransfer.files
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+  }
+
+  function initialize() {
+    document.body.addEventListener('htmx:beforeRequest', function(event) {
+      const form = uploadForm(event)
+      if (form) beginUpload(form)
+      const autoTranslate = autoTranslateContainer(event)
+      if (autoTranslate) beginAutoTranslate(autoTranslate)
+    })
+
+    document.body.addEventListener('htmx:xhr:progress', function(event) {
+      const form = uploadForm(event)
+      if (!form || !event.detail.total) return
+      const percent = Math.round(event.detail.loaded / event.detail.total * 100)
+      setUploadProgress(form, percent, `${percent}% uploaded`)
+    })
+
+    document.body.addEventListener('htmx:afterRequest', function(event) {
+      const form = uploadForm(event)
+      if (form) {
+        if (event.detail.successful) finishUpload(form)
+        else failUpload(form)
+      }
+      if (!event.detail.successful) {
+        const autoTranslate = autoTranslateContainer(event)
+        if (autoTranslate) failAutoTranslate(autoTranslate)
+      }
+    })
+
+    for (const eventName of ['htmx:responseError', 'htmx:sendError']) {
+      document.body.addEventListener(eventName, function(event) {
+        const form = uploadForm(event)
+        if (form) failUpload(form)
+        const autoTranslate = autoTranslateContainer(event)
+        if (autoTranslate) failAutoTranslate(autoTranslate)
+      })
+    }
+
+    document.body.addEventListener('htmx:load', function(event) {
+      bindUpload(event.target)
+    })
+    bindUpload(document)
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initialize, { once: true })
+  } else {
+    initialize()
+  }
+})()

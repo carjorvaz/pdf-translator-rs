@@ -23,13 +23,15 @@
 //! 1. Draw white rectangles to cover original text
 //! 2. Draw translated text at consistent font size
 
+use std::collections::{BTreeMap, HashSet};
+
 use lopdf::{Document, Object, ObjectId, Stream};
 
-use crate::config::TextColor;
-use crate::error::{Error, Result};
-use super::font::EmbeddedFont;
+use super::font::{EmbeddedFont, FontEncoding};
 use super::page_index::PageIndex;
 use super::text::BoundingBox;
+use crate::config::TextColor;
+use crate::error::{Error, Result};
 
 // =============================================================================
 // Layout Constants
@@ -52,21 +54,12 @@ const PAGE_RIGHT_MARGIN: f32 = 40.0;
 // =============================================================================
 
 /// Options for PDF overlay creation
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct OverlayOptions {
     /// Text color for translations
     pub text_color: TextColor,
     /// Font size for translations (if None, uses DEFAULT_FONT_SIZE)
     pub font_size: Option<f32>,
-}
-
-impl Default for OverlayOptions {
-    fn default() -> Self {
-        Self {
-            text_color: TextColor::default(),
-            font_size: None,
-        }
-    }
 }
 
 /// A translation overlay to be applied to a PDF.
@@ -128,12 +121,14 @@ impl RenderBlock {
         #[allow(clippy::cast_precision_loss)]
         let text_height = lines.len() as f32 * line_height;
 
-        let rendered_width = lines.iter()
+        let rendered_width = lines
+            .iter()
             .map(|l| font.string_width(l, font_size))
             .fold(0.0_f32, f32::max);
 
         // Rectangle covers original text area (minimum) or rendered text (if wider)
-        let rect_width = original_width.max(rendered_width) + RECT_LEFT_PADDING + RECT_RIGHT_PADDING;
+        let rect_width =
+            original_width.max(rendered_width) + RECT_LEFT_PADDING + RECT_RIGHT_PADDING;
         let rect_height = original_height.max(text_height) + RECT_TOP_PADDING + RECT_BOTTOM_PADDING;
 
         let rect_x = (x - RECT_LEFT_PADDING).max(0.0);
@@ -232,7 +227,7 @@ pub struct PdfOverlay {
 
 impl PdfOverlay {
     /// Create a new overlay creator with the given options.
-    pub fn new(options: OverlayOptions) -> Self {
+    pub const fn new(options: OverlayOptions) -> Self {
         Self { options }
     }
 
@@ -258,16 +253,17 @@ impl PdfOverlay {
         })?;
         let page_id = *page_id;
 
-        let page_obj = doc.get_object(page_id)
+        let page_obj = doc
+            .get_object(page_id)
             .map_err(|e| Error::Lopdf(format!("Failed to get page object: {e}")))?;
 
         let media_box = get_media_box(&doc, page_obj)?;
 
-        // Embed the Unicode font in the document
-        font.embed_in_document(&mut doc, page_id)?;
+        // Create the content and CID assignment together so the embedded font
+        // describes exactly the characters that the stream emits.
+        let (overlay_content, encoding) = self.create_overlay_content(overlays, &media_box)?;
 
-        // Create content stream for overlays
-        let overlay_content = self.create_overlay_content(overlays, &media_box);
+        font.embed_in_document(&mut doc, page_id, &encoding)?;
 
         // Append to page content
         Self::append_content_to_page(&mut doc, page_id, &overlay_content)?;
@@ -294,7 +290,11 @@ impl PdfOverlay {
     }
 
     /// Create PDF content stream for overlays.
-    fn create_overlay_content(&self, overlays: &[TranslationOverlay], media_box: &[f32; 4]) -> String {
+    fn create_overlay_content(
+        &self,
+        overlays: &[TranslationOverlay],
+        media_box: &[f32; 4],
+    ) -> Result<(String, FontEncoding)> {
         use std::fmt::Write;
 
         let font = EmbeddedFont::global();
@@ -310,6 +310,11 @@ impl PdfOverlay {
 
         // Adjust positions to prevent overlapping text
         adjust_blocks_to_prevent_overlap(&mut blocks);
+        let encoding = font.encoding_for_characters(
+            blocks
+                .iter()
+                .flat_map(|block| block.lines.iter().flat_map(|line| line.chars())),
+        )?;
 
         let mut content = String::new();
 
@@ -339,13 +344,13 @@ impl PdfOverlay {
         for block in &blocks {
             for (j, line) in block.lines.iter().enumerate() {
                 #[allow(clippy::cast_precision_loss)]
-                let y = block.text_start_y - (j as f32 * block.line_height);
+                let y = (j as f32).mul_add(-block.line_height, block.text_start_y);
 
                 content.push_str("BT\n");
                 let _ = writeln!(content, "/FTrans {} Tf", block.font_size);
                 let _ = writeln!(content, "{} {} Td", block.text_x, y);
-                let hex_glyphs = font.text_to_hex_glyphs(line);
-                let _ = writeln!(content, "<{hex_glyphs}> Tj");
+                let hex_cids = EmbeddedFont::text_to_hex_cids(line, &encoding)?;
+                let _ = writeln!(content, "<{hex_cids}> Tj");
                 content.push_str("ET\n");
             }
         }
@@ -353,23 +358,17 @@ impl PdfOverlay {
         // Restore graphics state
         content.push_str("Q\n");
 
-        content
+        Ok((content, encoding))
     }
 
     /// Append content stream to a page.
-    fn append_content_to_page(
-        doc: &mut Document,
-        page_id: ObjectId,
-        content: &str,
-    ) -> Result<()> {
-        let content_stream = Stream::new(
-            lopdf::Dictionary::new(),
-            content.as_bytes().to_vec(),
-        );
+    fn append_content_to_page(doc: &mut Document, page_id: ObjectId, content: &str) -> Result<()> {
+        let content_stream = Stream::new(lopdf::Dictionary::new(), content.as_bytes().to_vec());
 
         let content_id = doc.add_object(Object::Stream(content_stream));
 
-        let page = doc.get_object_mut(page_id)
+        let page = doc
+            .get_object_mut(page_id)
             .map_err(|e| Error::Lopdf(format!("Failed to get page: {e}")))?;
 
         if let Object::Dictionary(dict) = page {
@@ -401,62 +400,150 @@ impl PdfOverlay {
 // Helper Functions
 // =============================================================================
 
-/// Get media box from page object.
-///
-/// Handles both inline and indirect (referenced) MediaBox arrays, and
-/// walks up the Pages tree with a depth limit to prevent infinite
-/// recursion on malformed PDFs.
+/// Get the effective MediaBox from a page or its ancestors.
 fn get_media_box(doc: &Document, page_obj: &Object) -> Result<[f32; 4]> {
-    get_media_box_recursive(doc, page_obj, 10)
+    let mut current = page_obj;
+    let mut visited = HashSet::new();
+
+    loop {
+        let Object::Dictionary(dictionary) = current else {
+            return Err(Error::Lopdf(
+                "Page tree object is not a dictionary".to_string(),
+            ));
+        };
+
+        if let Ok(media_box) = dictionary.get(b"MediaBox") {
+            return parse_media_box(doc, media_box);
+        }
+
+        match dictionary.get(b"Parent").ok() {
+            Some(Object::Reference(parent_id)) => {
+                if !visited.insert(*parent_id) {
+                    return Err(Error::Lopdf(format!(
+                        "Cycle in page Parent chain at {parent_id:?}"
+                    )));
+                }
+                current = doc.get_object(*parent_id).map_err(|error| {
+                    Error::Lopdf(format!("Failed to get Pages node {parent_id:?}: {error}"))
+                })?;
+            }
+            Some(_) => {
+                return Err(Error::Lopdf(
+                    "Page Parent is not an indirect reference".to_string(),
+                ));
+            }
+            None => {
+                return Err(Error::Lopdf(
+                    "Page tree does not define an inherited MediaBox".to_string(),
+                ));
+            }
+        }
+    }
 }
 
-fn get_media_box_recursive(doc: &Document, page_obj: &Object, depth: usize) -> Result<[f32; 4]> {
-    if depth == 0 {
-        return Ok([0.0, 0.0, 612.0, 792.0]);
+fn parse_media_box(doc: &Document, object: &Object) -> Result<[f32; 4]> {
+    let mut object = object;
+    let mut visited = HashSet::new();
+    while let Object::Reference(object_id) = object {
+        if !visited.insert(*object_id) {
+            return Err(Error::Lopdf(format!(
+                "Cycle while resolving MediaBox at {object_id:?}"
+            )));
+        }
+        object = doc.get_object(*object_id).map_err(|error| {
+            Error::Lopdf(format!("Failed to resolve MediaBox {object_id:?}: {error}"))
+        })?;
     }
 
-    if let Object::Dictionary(dict) = page_obj {
-        if let Ok(media_box_obj) = dict.get(b"MediaBox") {
-            // Resolve indirect reference if needed
-            let arr = match media_box_obj {
-                Object::Array(arr) => Some(arr),
-                Object::Reference(ref_id) => {
-                    if let Ok(Object::Array(arr)) = doc.get_object(*ref_id) {
-                        Some(arr)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            };
+    let Object::Array(values) = object else {
+        return Err(Error::Lopdf("MediaBox is not an array".to_string()));
+    };
+    if values.len() != 4 {
+        return Err(Error::Lopdf(format!(
+            "MediaBox must contain four numbers, found {}",
+            values.len()
+        )));
+    }
 
-            if let Some(arr) = arr {
-                if arr.len() == 4 {
-                    let values: Vec<f32> = arr
-                        .iter()
-                        .filter_map(|o| match o {
-                            #[allow(clippy::cast_precision_loss)]
-                            Object::Integer(i) => Some(*i as f32),
-                            Object::Real(r) => Some(*r),
-                            _ => None,
-                        })
-                        .collect();
+    let mut parsed = [0.0_f32; 4];
+    for (index, value) in values.iter().enumerate() {
+        parsed[index] = match value {
+            #[allow(clippy::cast_precision_loss)]
+            Object::Integer(number) => *number as f32,
+            Object::Real(number) => *number,
+            _ => {
+                return Err(Error::Lopdf(format!(
+                    "MediaBox entry {} is not numeric",
+                    index + 1
+                )));
+            }
+        };
+    }
+    Ok(parsed)
+}
 
-                    if values.len() == 4 {
-                        return Ok([values[0], values[1], values[2], values[3]]);
-                    }
-                }
+/// Materialize every standard inheritable page attribute before reparenting.
+///
+/// Values are cloned as PDF objects, so indirect Resources and box objects
+/// remain indirect rather than being flattened or re-created.
+fn materialize_inheritable_page_attributes(
+    doc: &mut Document,
+    target_page_id: ObjectId,
+) -> Result<()> {
+    const ATTRIBUTES: [&[u8]; 4] = [b"Resources", b"MediaBox", b"CropBox", b"Rotate"];
+
+    let mut values: BTreeMap<&'static [u8], Object> = BTreeMap::new();
+    let mut visited = HashSet::new();
+    let mut current_id = target_page_id;
+
+    loop {
+        if !visited.insert(current_id) {
+            return Err(Error::Lopdf(format!(
+                "Cycle in page Parent chain at {current_id:?}"
+            )));
+        }
+
+        let current = doc.get_object(current_id).map_err(|error| {
+            Error::Lopdf(format!(
+                "Failed to get page tree object {current_id:?}: {error}"
+            ))
+        })?;
+        let Object::Dictionary(dictionary) = current else {
+            return Err(Error::Lopdf(
+                "Page tree object is not a dictionary".to_string(),
+            ));
+        };
+
+        for name in ATTRIBUTES {
+            if !values.contains_key(name)
+                && let Ok(value) = dictionary.get(name)
+            {
+                values.insert(name, value.clone());
             }
         }
 
-        if let Ok(Object::Reference(parent_id)) = dict.get(b"Parent")
-            && let Ok(parent) = doc.get_object(*parent_id) {
-                return get_media_box_recursive(doc, parent, depth - 1);
+        match dictionary.get(b"Parent").ok() {
+            Some(Object::Reference(parent_id)) => current_id = *parent_id,
+            Some(_) => {
+                return Err(Error::Lopdf(
+                    "Page Parent is not an indirect reference".to_string(),
+                ));
             }
+            None => break,
+        }
     }
 
-    // Default to US Letter size
-    Ok([0.0, 0.0, 612.0, 792.0])
+    let page = doc
+        .get_object_mut(target_page_id)
+        .map_err(|error| Error::Lopdf(format!("Failed to get page: {error}")))?;
+    let Object::Dictionary(page) = page else {
+        return Err(Error::Lopdf("Page object is not a dictionary".to_string()));
+    };
+    for (name, value) in values {
+        page.set(name, value);
+    }
+
+    Ok(())
 }
 
 /// Restructure a document to contain only a single page.
@@ -464,8 +551,11 @@ fn get_media_box_recursive(doc: &Document, page_obj: &Object, depth: usize) -> R
 /// Modifies the Pages tree to reference only the target page,
 /// making this a single-page PDF for efficient storage and combining.
 fn keep_single_page(doc: &mut Document, target_page_id: ObjectId) -> Result<()> {
+    materialize_inheritable_page_attributes(doc, target_page_id)?;
     // Find the root catalog
-    let root_ref = doc.trailer.get(b"Root")
+    let root_ref = doc
+        .trailer
+        .get(b"Root")
         .map_err(|e| Error::Lopdf(format!("No Root in trailer: {e}")))?;
 
     let catalog_id = match root_ref {
@@ -474,7 +564,8 @@ fn keep_single_page(doc: &mut Document, target_page_id: ObjectId) -> Result<()> 
     };
 
     let pages_id = {
-        let catalog = doc.get_object(catalog_id)
+        let catalog = doc
+            .get_object(catalog_id)
             .map_err(|e| Error::Lopdf(format!("Failed to get catalog: {e}")))?;
         match catalog {
             Object::Dictionary(dict) => match dict.get(b"Pages") {
@@ -487,7 +578,10 @@ fn keep_single_page(doc: &mut Document, target_page_id: ObjectId) -> Result<()> 
 
     // Update the Pages tree to only contain the target page
     if let Ok(Object::Dictionary(pages_dict)) = doc.get_object_mut(pages_id) {
-        pages_dict.set("Kids", Object::Array(vec![Object::Reference(target_page_id)]));
+        pages_dict.set(
+            "Kids",
+            Object::Array(vec![Object::Reference(target_page_id)]),
+        );
         pages_dict.set("Count", Object::Integer(1));
     }
 
@@ -613,7 +707,9 @@ pub fn combine_pdfs(pages: &[Vec<u8>]) -> Result<Vec<u8>> {
         if let Object::Dictionary(dict) = object {
             let mut new_dict = dict.clone();
             new_dict.set("Parent", Object::Reference(pages_id));
-            document.objects.insert(*obj_id, Object::Dictionary(new_dict));
+            document
+                .objects
+                .insert(*obj_id, Object::Dictionary(new_dict));
         }
     }
 
@@ -630,14 +726,18 @@ pub fn combine_pdfs(pages: &[Vec<u8>]) -> Result<Vec<u8>> {
         ("Kids", Object::Array(kids)),
         ("Count", Object::Integer(i64::from(total_pages))),
     ]);
-    document.objects.insert(pages_id, Object::Dictionary(pages_dict_obj));
+    document
+        .objects
+        .insert(pages_id, Object::Dictionary(pages_dict_obj));
 
     let catalog_id = document.new_object_id();
     let catalog_dict_obj = lopdf::Dictionary::from_iter([
         ("Type", Object::Name(b"Catalog".to_vec())),
         ("Pages", Object::Reference(pages_id)),
     ]);
-    document.objects.insert(catalog_id, Object::Dictionary(catalog_dict_obj));
+    document
+        .objects
+        .insert(catalog_id, Object::Dictionary(catalog_dict_obj));
 
     document.trailer.set("Root", Object::Reference(catalog_id));
 
@@ -649,7 +749,8 @@ pub fn combine_pdfs(pages: &[Vec<u8>]) -> Result<Vec<u8>> {
     document.compress();
 
     let mut output = Vec::new();
-    document.save_to(&mut output)
+    document
+        .save_to(&mut output)
         .map_err(|e| Error::PdfSave(format!("Failed to save combined PDF: {e}")))?;
 
     Ok(output)
@@ -709,10 +810,14 @@ mod tests {
 
         let page_tree = lopdf::Dictionary::from_iter([
             ("Type", Object::Name(b"Pages".to_vec())),
-            ("Kids", Object::Array(vec![Object::Reference(single_page_id)])),
+            (
+                "Kids",
+                Object::Array(vec![Object::Reference(single_page_id)]),
+            ),
             ("Count", Object::Integer(1)),
         ]);
-        doc.objects.insert(page_tree_id, Object::Dictionary(page_tree));
+        doc.objects
+            .insert(page_tree_id, Object::Dictionary(page_tree));
 
         let catalog_id = doc.add_object(lopdf::Dictionary::from_iter([
             ("Type", Object::Name(b"Catalog".to_vec())),

@@ -2,16 +2,21 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tracing::{debug, warn, error};
+use tracing::{debug, error, warn};
 
-use crate::config::Lang;
-use crate::error::{Error, Result};
 use super::traits::{Translator, TranslatorInfo};
+use crate::config::{Lang, TranslatorCacheIdentity};
+use crate::error::{Error, Result};
 
 /// Default number of retry attempts
 pub const DEFAULT_RETRY_COUNT: u32 = 3;
 /// Default delay between retries in milliseconds
 pub const DEFAULT_RETRY_DELAY_MS: u64 = 1000;
+
+const MAX_SUCCESS_BODY_BYTES: usize = 1024 * 1024;
+const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+const MAX_RETRY_AFTER_SECONDS: u64 = 300;
+const DEFAULT_RATE_LIMIT_DELAY_SECONDS: u64 = 5;
 
 /// OpenAI-compatible API translator
 /// Works with: llama.cpp server, Ollama, DeepSeek, OpenAI, etc.
@@ -53,6 +58,7 @@ struct ChatResponse {
 #[derive(Debug, Deserialize)]
 struct Choice {
     message: ResponseMessage,
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,7 +100,103 @@ impl OpenAiTranslator {
     /// # Panics
     /// Panics if the HTTP client cannot be created.
     pub fn with_defaults(api_base: String, api_key: Option<String>, model: String) -> Self {
-        Self::new(api_base, api_key, model, DEFAULT_RETRY_COUNT, DEFAULT_RETRY_DELAY_MS)
+        Self::new(
+            api_base,
+            api_key,
+            model,
+            DEFAULT_RETRY_COUNT,
+            DEFAULT_RETRY_DELAY_MS,
+        )
+    }
+
+    fn normalized_endpoint(&self) -> String {
+        let trimmed = self.api_base.trim();
+        if let Ok(mut url) = reqwest::Url::parse(trimmed) {
+            let path = url.path().trim_end_matches('/').to_string();
+            url.set_path(if path.is_empty() { "/" } else { &path });
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.set_query(None);
+            url.set_fragment(None);
+            return url.as_str().trim_end_matches('/').to_string();
+        }
+
+        trimmed.trim_end_matches('/').to_string()
+    }
+
+    async fn read_body_limited(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
+        let limit_u64 = u64::try_from(limit).map_err(|_| {
+            Error::TranslationInvalidResponse("response size limit is invalid".to_string())
+        })?;
+        if response
+            .content_length()
+            .is_some_and(|length| length > limit_u64)
+        {
+            return Err(Error::TranslationInvalidResponse(
+                "translation API response exceeded the size limit".to_string(),
+            ));
+        }
+
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|_| {
+            Error::TranslationRequest("failed to read translation API response".to_string())
+        })? {
+            let new_len = body.len().checked_add(chunk.len()).ok_or_else(|| {
+                Error::TranslationInvalidResponse(
+                    "translation API response exceeded the size limit".to_string(),
+                )
+            })?;
+            if new_len > limit {
+                return Err(Error::TranslationInvalidResponse(
+                    "translation API response exceeded the size limit".to_string(),
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
+    }
+
+    fn parse_completion(body: &[u8]) -> Result<String> {
+        let response: ChatResponse = serde_json::from_slice(body).map_err(|_| {
+            Error::TranslationInvalidResponse("translation API returned malformed JSON".to_string())
+        })?;
+        let choice = response.choices.first().ok_or_else(|| {
+            Error::TranslationInvalidResponse(
+                "translation API response contained no choices".to_string(),
+            )
+        })?;
+        match choice.finish_reason.as_deref() {
+            Some("stop") => {}
+            Some("length") => {
+                return Err(Error::TranslationInvalidResponse(
+                    "translation API response was truncated".to_string(),
+                ));
+            }
+            Some("content_filter") => {
+                return Err(Error::TranslationInvalidResponse(
+                    "translation API response was content-filtered".to_string(),
+                ));
+            }
+            _ => {
+                return Err(Error::TranslationInvalidResponse(
+                    "translation API response was incomplete".to_string(),
+                ));
+            }
+        }
+
+        let translated = choice
+            .message
+            .content
+            .trim()
+            .trim_start_matches('"')
+            .trim_end_matches('"')
+            .trim();
+        if translated.is_empty() {
+            return Err(Error::TranslationInvalidResponse(
+                "translation API response was blank".to_string(),
+            ));
+        }
+        Ok(translated.to_string())
     }
 
     /// Create translation prompt
@@ -102,12 +204,12 @@ impl OpenAiTranslator {
         let source_hint = if source.as_str() == "auto" {
             String::new()
         } else {
-            format!(" from {}", source_language_name(source))
+            format!(" from {}", language_name(source))
         };
         format!(
             "Translate the following text{} into {}. Output only the translation, no explanations.\n\nText: \"{}\"",
             source_hint,
-            target_language_name(target),
+            language_name(target),
             text
         )
     }
@@ -116,98 +218,86 @@ impl OpenAiTranslator {
     async fn request_with_retry(&self, text: &str, source: &Lang, target: &Lang) -> Result<String> {
         let url = format!("{}/chat/completions", self.api_base.trim_end_matches('/'));
         let prompt = Self::create_prompt(text, source, target);
-
         let request = ChatRequest {
             model: self.model.clone(),
             messages: vec![Message {
                 role: "user".to_string(),
                 content: prompt,
             }],
-            temperature: Some(0.3), // Lower temperature for more consistent translations
+            temperature: Some(0.3),
             max_tokens: None,
         };
-
+        let attempts = self.retry_count.max(1);
         let mut last_error = None;
 
-        for attempt in 0..self.retry_count {
+        for attempt in 0..attempts {
             debug!(
                 "Translation request attempt {}/{} to {}",
                 attempt + 1,
-                self.retry_count,
+                attempts,
                 url
             );
 
             let mut req = self.client.post(&url).json(&request);
-
-            // Add API key if configured
-            if let Some(ref key) = self.api_key {
+            if let Some(key) = &self.api_key {
                 req = req.header("Authorization", format!("Bearer {key}"));
             }
 
             match req.send().await {
                 Ok(response) => {
-                    if response.status().is_success() {
-                        match response.json::<ChatResponse>().await {
-                            Ok(chat_response) => {
-                                if let Some(choice) = chat_response.choices.first() {
-                                    let translated = choice.message.content.trim();
-                                    // Remove quotes if the model wrapped the response
-                                    let translated = translated
-                                        .trim_start_matches('"')
-                                        .trim_end_matches('"')
-                                        .to_string();
-                                    return Ok(translated);
-                                }
-                                last_error = Some(Error::TranslationInvalidResponse(
-                                    "No choices in response".to_string(),
-                                ));
-                            }
-                            Err(e) => {
-                                warn!("Failed to parse response: {}", e);
-                                last_error = Some(Error::TranslationInvalidResponse(e.to_string()));
-                            }
+                    let status = response.status();
+                    if status.is_success() {
+                        match Self::read_body_limited(response, MAX_SUCCESS_BODY_BYTES).await {
+                            Ok(body) => match Self::parse_completion(&body) {
+                                Ok(translated) => return Ok(translated),
+                                Err(error) => last_error = Some(error),
+                            },
+                            Err(error) => last_error = Some(error),
                         }
-                    } else if response.status().as_u16() == 429 {
-                        // Rate limited
+                    } else if status.as_u16() == 429 {
                         let retry_after = response
                             .headers()
                             .get("retry-after")
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|v| v.parse().ok());
-
-                        warn!("Rate limited, retry after {:?}s", retry_after);
+                            .and_then(|value| value.to_str().ok())
+                            .and_then(|value| value.parse::<u64>().ok())
+                            .map(|seconds| seconds.min(MAX_RETRY_AFTER_SECONDS));
+                        let _ = Self::read_body_limited(response, MAX_ERROR_BODY_BYTES).await;
+                        warn!("Translation API rate limited the request");
                         last_error = Some(Error::TranslationRateLimited { retry_after });
 
-                        // Wait longer on rate limit
-                        let wait_time = retry_after.unwrap_or(5) * 1000;
-                        tokio::time::sleep(Duration::from_millis(wait_time)).await;
+                        if attempt + 1 < attempts {
+                            let delay = retry_after
+                                .unwrap_or(DEFAULT_RATE_LIMIT_DELAY_SECONDS)
+                                .min(MAX_RETRY_AFTER_SECONDS);
+                            tokio::time::sleep(Duration::from_secs(delay)).await;
+                        }
                         continue;
                     } else {
-                        let status = response.status();
-                        let body = response.text().await.unwrap_or_default();
-                        warn!("API error: {} - {}", status, body);
+                        let _ = Self::read_body_limited(response, MAX_ERROR_BODY_BYTES).await;
+                        warn!("Translation API returned HTTP {}", status);
                         last_error = Some(Error::TranslationRequest(format!(
-                            "HTTP {status}: {body}"
+                            "upstream returned HTTP {status}"
                         )));
                     }
                 }
-                Err(e) => {
-                    warn!("Request failed: {}", e);
-                    if e.is_timeout() {
-                        last_error = Some(Error::TranslationTimeout);
+                Err(error) => {
+                    warn!("Translation request failed: {}", error);
+                    last_error = Some(if error.is_timeout() {
+                        Error::TranslationTimeout
                     } else {
-                        last_error = Some(Error::TranslationRequest(e.to_string()));
-                    }
+                        Error::TranslationRequest(
+                            "translation API request could not be completed".to_string(),
+                        )
+                    });
                 }
             }
 
-            // Wait before retry
-            if attempt < self.retry_count - 1 {
+            if attempt + 1 < attempts {
                 tokio::time::sleep(Duration::from_millis(self.retry_delay_ms)).await;
             }
         }
 
-        error!("Translation failed after {} attempts", self.retry_count);
+        error!("Translation failed after {} attempts", attempts);
         Err(last_error.unwrap_or(Error::TranslationMaxRetriesExceeded))
     }
 }
@@ -220,6 +310,14 @@ impl Translator for OpenAiTranslator {
             requires_api_key: false, // Optional for local servers
             supports_auto_detect: true,
         }
+    }
+
+    fn cache_identity(&self) -> TranslatorCacheIdentity {
+        TranslatorCacheIdentity::new(
+            "openai-compatible",
+            self.normalized_endpoint(),
+            self.model.clone(),
+        )
     }
 
     async fn translate(&self, text: &str, source: &Lang, target: &Lang) -> Result<String> {
@@ -242,8 +340,8 @@ impl Translator for OpenAiTranslator {
     }
 }
 
-/// Convert language code to human-readable name for prompts
-fn language_name(lang: &Lang) -> &'static str {
+/// Convert a language code to a human-readable prompt value when known.
+fn language_name(lang: &Lang) -> &str {
     match lang.as_str() {
         "en" => "English",
         "zh-CN" => "Simplified Chinese",
@@ -260,18 +358,8 @@ fn language_name(lang: &Lang) -> &'static str {
         "hi" => "Hindi",
         "th" => "Thai",
         "vi" => "Vietnamese",
-        // For unknown languages, the LLM should still understand most ISO codes
-        _ => "the specified language",
+        _ => lang.as_str(),
     }
-}
-
-/// Alias for backwards compatibility and clarity in prompts
-fn target_language_name(lang: &Lang) -> &'static str {
-    language_name(lang)
-}
-
-fn source_language_name(lang: &Lang) -> &'static str {
-    language_name(lang)
 }
 
 #[cfg(test)]
@@ -282,6 +370,6 @@ mod tests {
     fn test_language_name() {
         assert_eq!(language_name(&Lang::new("en")), "English");
         assert_eq!(language_name(&Lang::new("zh-CN")), "Simplified Chinese");
-        assert_eq!(language_name(&Lang::new("unknown")), "the specified language");
+        assert_eq!(language_name(&Lang::new("unknown")), "unknown");
     }
 }

@@ -25,46 +25,82 @@ Inspired by [pdf-translator-for-human](https://github.com/davideuler/pdf-transla
 
 ## Usage
 
+### With Nix
+
 Requires [Nix](https://nixos.org/) with flakes enabled.
 
-### Quick Start (Local LLM)
+```bash
+# Start a local LLM server (models download automatically from Hugging Face).
+nix run github:carjorvaz/pdf-translator-rs#serve-model
+
+# In another terminal, start the web interface.
+nix run github:carjorvaz/pdf-translator-rs#web
+```
+
+The model server defaults to Qwen3-4B. Pass `small` for Qwen3-1.7B or `quality`
+for Qwen3-8B:
 
 ```bash
-# Start a local LLM server (models downloaded automatically from HuggingFace)
-nix run github:carjorvaz/pdf-translator-rs#serve-model            # Qwen3-4B (recommended)
-nix run github:carjorvaz/pdf-translator-rs#serve-model -- small   # Qwen3-1.7B (~1.1GB, low RAM)
-nix run github:carjorvaz/pdf-translator-rs#serve-model -- quality # Qwen3-8B (~5.1GB, better quality)
-
-# In another terminal, start the web interface
-nix run github:carjorvaz/pdf-translator-rs#web
+nix run github:carjorvaz/pdf-translator-rs#serve-model -- small
 ```
 
 Then open http://localhost:3000.
 
-### Cloud APIs
-
-For DeepSeek, OpenAI, or other cloud providers, set credentials via environment or a `.env` file:
+For batch translation, run the `cli` app (which executes `pdf-translate`):
 
 ```bash
-OPENAI_API_KEY=your-key
-OPENAI_API_BASE=https://api.deepseek.com/v1  # defaults to localhost:8080
-OPENAI_MODEL=deepseek-chat
+nix run github:carjorvaz/pdf-translator-rs#cli -- input.pdf --source fr --target en --output translated.pdf
+
+# Translate specific pages only.
+nix run github:carjorvaz/pdf-translator-rs#cli -- input.pdf --pages 1-10 --source de --target en
 ```
 
+### From source
+
+With Rust and the native dependencies installed, use the binaries' actual names:
+
 ```bash
+cargo run --bin pdf-translator-web
+cargo run --bin pdf-translate -- input.pdf --source fr --target en --output translated.pdf
+```
+
+### Cloud APIs
+
+Both binaries load an ignored `.env` file when present and otherwise read the
+process environment. For a cloud provider, enter the key at runtime so it is
+not written to this repository, then export all OpenAI-compatible settings:
+
+```bash
+printf 'API key: '
+IFS= read -r -s OPENAI_API_KEY
+printf '\n'
+export OPENAI_API_KEY
+export OPENAI_API_BASE='https://api.deepseek.com/v1'
+export OPENAI_MODEL='deepseek-chat'
+
 nix run github:carjorvaz/pdf-translator-rs#web
 ```
 
-### CLI
+For OpenAI, use `https://api.openai.com/v1` and an OpenAI model name instead.
+Local llama.cpp defaults require no key: `OPENAI_API_BASE` defaults to
+`http://localhost:8080/v1` and `OPENAI_MODEL` defaults to `default_model`.
 
-For batch translation of entire documents:
+### CLI configuration
 
-```bash
-nix run github:carjorvaz/pdf-translator-rs#cli -- input.pdf --source fr --target en -o translated.pdf
+`config.example.toml` documents the CLI configuration file. Pass an exact file
+with `--config PATH`. Without `--config`, `pdf-translate` first tries
+`$XDG_CONFIG_HOME/pdf-translator/config.toml` (or
+`$HOME/.config/pdf-translator/config.toml`) and then `./config.toml`; it uses
+the first valid file found, or built-in defaults if neither can be loaded.
 
-# Translate specific pages only
-nix run github:carjorvaz/pdf-translator-rs#cli -- input.pdf --pages 1-10 --source de --target en
-```
+The CLI loads `.env` before parsing options. Existing process environment
+values take precedence over `.env`. `OPENAI_API_BASE`, `OPENAI_API_KEY`, and
+`OPENAI_MODEL` override the corresponding file values, and explicit CLI flags
+override both environment and file values. Other explicit flags such as
+`--source`, `--target`, and `--color` override their file values. When a flag
+or its corresponding environment variable is absent, the loaded configuration
+value is preserved. The web binary does not read `config.toml`; configure it
+with its CLI flags and the environment variables shown above.
 
 ### NixOS Module
 
@@ -83,14 +119,53 @@ For server deployment:
 
   services.pdf-translator = {
     enable = true;
-    host = "0.0.0.0";
+    host = "127.0.0.1";
     port = 3000;
-    openFirewall = true;
     apiBase = "http://localhost:8080/v1";  # Your LLM server
     # apiKeyFile = /run/secrets/openai-api-key;  # Optional
   };
 }
 ```
+
+The service deliberately accepts only loopback bind addresses. Keep that
+boundary and publish it through a TLS reverse proxy that enforces
+authentication. For example, generate a password hash with
+`caddy hash-password`, replace the placeholder below, and let Caddy own the
+public ports:
+
+```nix
+services.caddy = {
+  enable = true;
+  virtualHosts."translate.example.com".extraConfig = ''
+    @invalidOrigin {
+      method POST PUT PATCH DELETE
+      not header Origin https://translate.example.com
+    }
+    respond @invalidOrigin 403
+
+    basic_auth {
+      translator REPLACE_WITH_CADDY_BCRYPT_HASH
+    }
+    reverse_proxy 127.0.0.1:3000
+  '';
+};
+
+networking.firewall.allowedTCPPorts = [ 80 443 ];
+```
+
+Do not expose port 3000 or bind the application to a public address. Keep the
+proxy and application on the same host, terminate TLS at the proxy, and retain
+the exact unsafe-method `Origin` check when changing authentication. The basic
+authentication example is suitable for trusted personal access; use an
+identity-aware proxy with the same origin policy for multi-user deployments.
+
+### Live provider smoke test
+
+The manual `Live provider smoke` GitHub Actions workflow translates the
+committed test PDF through the real CLI and verifies a non-empty PDF result.
+Configure its `live-provider` environment with the `OPENAI_API_KEY` secret and
+the `OPENAI_API_BASE` and `OPENAI_MODEL` variables. It is never triggered by
+pull requests or ordinary pushes.
 
 ## Limitations
 

@@ -1,4 +1,5 @@
 {# Settings cleared - show placeholder and disable download #}
 <div class="placeholder">Click "Translate" to see translation</div>
-<div id="toast" hx-swap-oob="true" class="show success">Settings updated</div>
-<a id="download-btn" hx-swap-oob="true" href="#" class="btn btn-success btn-action disabled">Download</a>
+<div id="toast" hx-swap-oob="true" class="show success" role="status" aria-live="polite"
+     _="init remove @hx-vals from #translate-btn then remove .btn-secondary from #translate-btn then add .btn-primary to #translate-btn then set the innerText of the first <.btn-text/> in #translate-btn to 'Translate'">Settings updated</div>
+<a id="download-btn" hx-swap-oob="true" href="#" class="btn btn-success btn-action disabled" aria-disabled="true">Download</a>

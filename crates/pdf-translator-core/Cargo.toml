@@ -32,7 +32,6 @@ reqwest = { workspace = true }
 
 # Caching
 moka = { workspace = true }
-sled = { workspace = true }
 
 # Config
 config = { workspace = true }
@@ -52,7 +51,7 @@ bytes = { workspace = true }
 urlencoding = { workspace = true }
 
 # Font handling
-ttf-parser = { workspace = true }
+skrifa = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
